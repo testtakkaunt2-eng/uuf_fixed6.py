@@ -573,44 +573,119 @@ def render_smc_chart_png(candles, zones, struct_info, trade=None, width=820, hei
     )
 
 # ==================== BYBIT API (Full OHLC XM Offset Sync) ====================
+# ==================== MULTI-EXCHANGE API (403 Blokni Aylanib O'tish) ====================
 async def fetch_ohlcv(session, timeframe, symbol=SYMBOL, limit=LIMIT):
-    """
-    XAUUSDT so'ralganda _CURRENT_OFFSET ni har bir shamning O, H, L, C qiymatlariga
-    qo'shadi — shunda barcha FVG/OB zonalar, EQ va PDH/PDL XM narxiga 100% mos tushadi.
-    """
-    imap = {"1m": "1", "5m": "5", "15m": "15", "30m": "30",
-            "1h": "60", "4h": "240", "1d": "D"}
-    interval = imap.get(timeframe, timeframe)
-    url = "https://api.bybit.com/v5/market/kline"
-    params = {"category": "linear", "symbol": symbol,
-              "interval": interval, "limit": limit}
-
     offset = _CURRENT_OFFSET if symbol == SYMBOL else 0.0
-    last_err = None
-    for attempt in range(3):
+
+    # 1) Bybit zaxira domeni (bytick) va asosiy domen
+    imap_bybit = {"1m": "1", "5m": "5", "15m": "15", "30m": "30", "1h": "60", "4h": "240", "1d": "D"}
+    for domain in ("https://api.bytick.com", "https://api.bybit.com"):
         try:
-            async with session.get(url, params=params, headers=HEADERS, timeout=10) as r:
-                r.raise_for_status()
+            url = f"{domain}/v5/market/kline"
+            params = {"category": "linear", "symbol": symbol, "interval": imap_bybit.get(timeframe, timeframe), "limit": limit}
+            async with session.get(url, params=params, headers=HEADERS, timeout=8) as r:
+                if r.status == 200:
+                    data = await r.json()
+                    rows = data.get("result", {}).get("list", [])
+                    if rows:
+                        rows.sort(key=lambda x: int(x[0]))
+                        return [
+                            [int(x[0]), round(float(x[1]) + offset, 2), round(float(x[2]) + offset, 2),
+                             round(float(x[3]) + offset, 2), round(float(x[4]) + offset, 2), float(x[5])]
+                            for x in rows
+                        ]
+        except Exception:
+            pass
+
+    # 2) OKX API (AQSh serverlarida 403 bermaydi)
+    okx_sym_map = {"XAUUSDT": "XAU-USDT-SWAP", "BTCUSDT": "BTC-USDT-SWAP", "EURUSDT": "EUR-USDT"}
+    okx_tf_map = {"1m": "1m", "5m": "5m", "15m": "15m", "30m": "30m", "1h": "1H", "4h": "4H", "1d": "1Dutc"}
+    try:
+        url = "https://www.okx.com/api/v5/market/candles"
+        params = {"instId": okx_sym_map.get(symbol, "XAU-USDT-SWAP"), "bar": okx_tf_map.get(timeframe, "15m"), "limit": min(limit, 240)}
+        async with session.get(url, params=params, headers=HEADERS, timeout=10) as r:
+            if r.status == 200:
                 data = await r.json()
-                rows = data.get("result", {}).get("list", [])
-                if not rows:
-                    raise RuntimeError(f"Kline bo'sh: {symbol} {timeframe}")
-                rows.sort(key=lambda x: int(x[0]))
-                return [
-                    [
-                        int(x[0]),
-                        round(float(x[1]) + offset, 2),
-                        round(float(x[2]) + offset, 2),
-                        round(float(x[3]) + offset, 2),
-                        round(float(x[4]) + offset, 2),
-                        float(x[5]),
+                rows = data.get("data", [])
+                if rows:
+                    rows.sort(key=lambda x: int(x[0]))
+                    return [
+                        [int(x[0]), round(float(x[1]) + offset, 2), round(float(x[2]) + offset, 2),
+                         round(float(x[3]) + offset, 2), round(float(x[4]) + offset, 2), float(x[5])]
+                        for x in rows
                     ]
-                    for x in rows
-                ]
+    except Exception:
+        pass
+
+    # 3) Gate.io API (Zaxira)
+    gate_sym_map = {"XAUUSDT": "PAXG_USDT", "BTCUSDT": "BTC_USDT", "EURUSDT": "EUR_USDT"}
+    url = "https://api.gateio.ws/api/v4/spot/candlesticks"
+    params = {"currency_pair": gate_sym_map.get(symbol, "PAXG_USDT"), "interval": timeframe, "limit": limit}
+    async with session.get(url, params=params, headers=HEADERS, timeout=10) as r:
+        r.raise_for_status()
+        rows = await r.json()
+        rows.sort(key=lambda x: int(x[0]))
+        return [
+            [int(x[0]) * 1000, round(float(x[5]) + offset, 2), round(float(x[3]) + offset, 2),
+             round(float(x[4]) + offset, 2), round(float(x[2]) + offset, 2), float(x[1])]
+            for x in rows
+        ]
+
+# ==================== REAL-TIME WEBSOCKET LOOP ====================
+async def bybit_ws_loop(app):
+    global _LIVE_BYBIT_RAW_PRICE, _LIVE_PRICE, _WS_CONNECTED, _LAST_WS_MONITOR_TS
+    session = app["session"]
+    ws_urls = [
+        ("okx", "wss://ws.okx.com:8443/ws/v5/public"),
+        ("bybit", "wss://stream.bytick.com/v5/public/linear"),
+    ]
+    idx = 0
+
+    while True:
+        provider, ws_url = ws_urls[idx % len(ws_urls)]
+        try:
+            async with session.ws_connect(ws_url, heartbeat=20, timeout=15) as ws:
+                _WS_CONNECTED = True
+                if provider == "okx":
+                    await ws.send_json({"op": "subscribe", "args": [{"channel": "tickers", "instId": "XAU-USDT-SWAP"}]})
+                else:
+                    await ws.send_json({"op": "subscribe", "args": [f"tickers.{SYMBOL}"]})
+                logger.info(f"⚡ Real-time WebSocket ulandi ({provider.upper()})!")
+
+                async for msg in ws:
+                    if msg.type == aiohttp.WSMsgType.TEXT:
+                        payload = json.loads(msg.data)
+                        last_p_str = None
+                        if provider == "okx":
+                            arr = payload.get("data", [])
+                            if arr:
+                                last_p_str = arr[0].get("last")
+                        else:
+                            last_p_str = payload.get("data", {}).get("lastPrice")
+
+                        if last_p_str:
+                            raw_p = float(last_p_str)
+                            _LIVE_BYBIT_RAW_PRICE = raw_p
+                            live_xm = round(raw_p + _CURRENT_OFFSET, 2)
+                            _LIVE_PRICE = live_xm
+                            _metrics["ws_ticks"] += 1
+
+                            now_mono = time.monotonic()
+                            if now_mono - _LAST_WS_MONITOR_TS >= 0.35:
+                                _LAST_WS_MONITOR_TS = now_mono
+                                trade = await db.state_get("current_trade")
+                                if trade:
+                                    b15 = _LAST_STRUCT_15M.get("bias")
+                                    await monitor_trade(session, live_xm, b15)
+                    elif msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR):
+                        break
+        except asyncio.CancelledError:
+            raise
         except Exception as e:
-            last_err = e
-            await asyncio.sleep(0.4 * (attempt + 1))
-    raise last_err
+            _WS_CONNECTED = False
+            idx += 1
+            logger.warning(f"WS uzildi ({provider}), 3s dan so'ng qayta ulanadi: {_safe_log_error(e)}")
+            await asyncio.sleep(3)
 
 # ==================== REAL-TIME WEBSOCKET LOOP ====================
 async def bybit_ws_loop(app):
