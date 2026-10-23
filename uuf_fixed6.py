@@ -1,10 +1,11 @@
 """
-GOLD (XM / XAUUSDT) SMC + ICT Bot — v14 TITANIUM (REAL-TIME WS + GEMINI AI + 20$ SNIPER)
-========================================================================================
+GOLD (XM / XAUUSDT) SMC + ICT Bot — v14 TITANIUM (MULTI-EXCHANGE ANTI-403 + GEMINI AI + 20$ SNIPER)
+===================================================================================================
 Barcha modullar bitta faylga birlashtirildi:
-  ✅ Real-time Bybit WebSocket (wss://stream.bybit.com/v5/public/linear) + Auto-Reconnect
+  ✅ Anti-403 Multi-Exchange Engine (Bybit -> OKX -> Gate.io -> Kraken avtomatik zaxira)
+  ✅ Real-time WebSocket (OKX / Gate.io / Bybit) + Auto-Reconnect
   ✅ XM Broker 100% OHLC sinxronizatsiyasi (Default PRICE_OFFSET = -8.21 + /sync buyrug'i)
-  ✅ 20$ Small Account Sniper Mode (15m POI + 5m Tight SL: 1.2$ - 2.6$ risk himoyasi)
+  ✅ 20$ Small Account Sniper Mode (15m POI + 5m Tight SL: 1.2$ - 2.65$ risk himoyasi)
   ✅ Gemini AI Tahlilchi (/ai buyrug'i + har bir signalda AI xulosasi, qo'shimcha kutubxonasiz)
   ✅ 5m LTF Trigger (CHoCH/BOS, 5m FVG, Pinbar/Engulfing) + Breaker Blocks + OTE + PDH/PDL/Asia Sweep
   ✅ Ichki PNG Grafik Chizma Dvigateli (/chart va signalda avtomatik rasm)
@@ -59,14 +60,12 @@ MIN_SIGNAL_SCORE = 55
 TRADE_STALE_WARNING_HOURS = 6
 FLIP_WARN_INTERVAL_CHECKS = 10
 
-# 20$ Kichik balans uchun Sniper SL chegaralari (1 unsiya = 0.01 lot XM Standard da $ farqi)
 DEFAULT_BALANCE_USD = 20.0
-DEFAULT_RISK_PER_TRADE_PCT = 10.0  # 20$ balansda ~2.0$ risk
+DEFAULT_RISK_PER_TRADE_PCT = 10.0
 MAX_RISK_PER_TRADE_PCT = 25.0
-SNIPER_MIN_SL_POINTS = 1.20        # Minimal 1.20$ SL
-SNIPER_MAX_SL_POINTS_SMALL = 2.65  # 20$-50$ balansda maksimal 2.65$ SL (0.01 lotda -2.65$ dan oshmaydi)
+SNIPER_MIN_SL_POINTS = 1.20
+SNIPER_MAX_SL_POINTS_SMALL = 2.65
 
-# XM Brokerda 0.01 lot Standard = 1 troya unsiya (1$ harakat = 1$ foyda/zarar)
 XM_MIN_LOT = 0.01
 XM_OZ_PER_MIN_LOT = 1.0
 
@@ -78,7 +77,7 @@ except Exception:
     DATA_DIR = BASE_DIR
 DB_FILE = os.path.join(DATA_DIR, "gold_bot.sqlite")
 
-HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
 
 KILLZONES_ENABLED = True
 KILLZONES = [
@@ -110,13 +109,14 @@ WEBHOOK_ENABLED = bool(WEBHOOK_SECRET)
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "").strip()
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
 
-# XM va Bybit orasidagi default farq (-8.21)
 DEFAULT_PRICE_OFFSET = float(os.environ.get("PRICE_OFFSET", "-8.21"))
 _CURRENT_OFFSET = DEFAULT_PRICE_OFFSET
 _LIVE_BYBIT_RAW_PRICE = None
 _LIVE_PRICE = None
 _WS_CONNECTED = False
 _LAST_WS_MONITOR_TS = 0.0
+_BYBIT_BLOCKED = False
+_ACTIVE_PROVIDER = "AUTO"
 
 # ==================== HELPERS ====================
 def _safe_log_error(error):
@@ -317,11 +317,8 @@ async def win_rate_text():
     wr = (wins / denom * 100) if denom > 0 else 0.0
     return f"WR: {wr:.1f}% ({wins}✅ / {losses}❌ / {be}🛡 | Jami: {total})"
 
-# ==================== GEMINI AI ENGINE (Zero-Dependency) ====================
+# ==================== GEMINI AI ENGINE ====================
 async def ask_gemini_ai(session, prompt_text, system_instruction=None):
-    """
-    GEMINI_API_KEY bo'lsa, aiohttp orqali Gemini AI ga murojaat qiladi.
-    """
     if not GEMINI_API_KEY:
         return None
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}"
@@ -572,94 +569,218 @@ def render_smc_chart_png(candles, zones, struct_info, trade=None, width=820, hei
         + png_chunk(b"IEND", b"")
     )
 
-# ==================== BYBIT API (Full OHLC XM Offset Sync) ====================
-# ==================== MULTI-EXCHANGE API (403 Blokni Aylanib O'tish) ====================
+# ==================== MULTI-EXCHANGE ANTI-403 OHLCV ENGINE ====================
 async def fetch_ohlcv(session, timeframe, symbol=SYMBOL, limit=LIMIT):
+    """
+    AQSh (Render Oregon/Virginia) va Yevropa serverlarida 403 xatosiz ishlovchi
+    ko'p bosqichli (Bybit -> OKX -> Gate.io -> Kraken) OHLCV dvigateli.
+    """
+    global _BYBIT_BLOCKED, _ACTIVE_PROVIDER
     offset = _CURRENT_OFFSET if symbol == SYMBOL else 0.0
+    last_err = None
 
-    # 1) Bybit zaxira domeni (bytick) va asosiy domen
-    imap_bybit = {"1m": "1", "5m": "5", "15m": "15", "30m": "30", "1h": "60", "4h": "240", "1d": "D"}
-    for domain in ("https://api.bytick.com", "https://api.bybit.com"):
+    # 1-BOSQICH: Bybit (Agar 403 bermagan bo'lsa)
+    if not _BYBIT_BLOCKED:
+        imap = {"1m": "1", "5m": "5", "15m": "15", "30m": "30", "1h": "60", "4h": "240", "1d": "D"}
+        interval = imap.get(timeframe, timeframe)
+        url = "https://api.bybit.com/v5/market/kline"
+        params = {"category": "linear", "symbol": symbol, "interval": interval, "limit": limit}
         try:
-            url = f"{domain}/v5/market/kline"
-            params = {"category": "linear", "symbol": symbol, "interval": imap_bybit.get(timeframe, timeframe), "limit": limit}
-            async with session.get(url, params=params, headers=HEADERS, timeout=8) as r:
-                if r.status == 200:
+            async with session.get(url, params=params, headers=HEADERS, timeout=7) as r:
+                if r.status == 403:
+                    _BYBIT_BLOCKED = True
+                    logger.warning("Bybit 403 blok aniqlandi (US IP) -> Avtomatik zaxira birjalarga o'tildi!")
+                elif r.status == 200:
                     data = await r.json()
                     rows = data.get("result", {}).get("list", [])
                     if rows:
+                        _ACTIVE_PROVIDER = "BYBIT"
                         rows.sort(key=lambda x: int(x[0]))
                         return [
-                            [int(x[0]), round(float(x[1]) + offset, 2), round(float(x[2]) + offset, 2),
-                             round(float(x[3]) + offset, 2), round(float(x[4]) + offset, 2), float(x[5])]
+                            [
+                                int(x[0]),
+                                round(float(x[1]) + offset, 2),
+                                round(float(x[2]) + offset, 2),
+                                round(float(x[3]) + offset, 2),
+                                round(float(x[4]) + offset, 2),
+                                float(x[5]),
+                            ]
                             for x in rows
                         ]
-        except Exception:
-            pass
+        except Exception as e:
+            last_err = e
 
-    # 2) OKX API (AQSh serverlarida 403 bermaydi)
-    okx_sym_map = {"XAUUSDT": "XAU-USDT-SWAP", "BTCUSDT": "BTC-USDT-SWAP", "EURUSDT": "EUR-USDT"}
-    okx_tf_map = {"1m": "1m", "5m": "5m", "15m": "15m", "30m": "30m", "1h": "1H", "4h": "4H", "1d": "1Dutc"}
+    # 2-BOSQICH: OKX API (XAUT-USDT-SWAP oltin shartnomasi)
+    okx_sym_map = {
+        SYMBOL: "XAUT-USDT-SWAP",
+        BTC_SYMBOL: "BTC-USDT-SWAP",
+        EUR_SYMBOL: "EUR-USDT",
+    }
+    okx_tf_map = {
+        "1m": "1m", "5m": "5m", "15m": "15m", "30m": "30m",
+        "1h": "1H", "4h": "4H", "1d": "1Dutc",
+    }
     try:
         url = "https://www.okx.com/api/v5/market/candles"
-        params = {"instId": okx_sym_map.get(symbol, "XAU-USDT-SWAP"), "bar": okx_tf_map.get(timeframe, "15m"), "limit": min(limit, 240)}
-        async with session.get(url, params=params, headers=HEADERS, timeout=10) as r:
+        params = {
+            "instId": okx_sym_map.get(symbol, "XAUT-USDT-SWAP"),
+            "bar": okx_tf_map.get(timeframe, "15m"),
+            "limit": min(limit, 240),
+        }
+        async with session.get(url, params=params, headers=HEADERS, timeout=8) as r:
             if r.status == 200:
                 data = await r.json()
                 rows = data.get("data", [])
                 if rows:
+                    _ACTIVE_PROVIDER = "OKX"
                     rows.sort(key=lambda x: int(x[0]))
                     return [
-                        [int(x[0]), round(float(x[1]) + offset, 2), round(float(x[2]) + offset, 2),
-                         round(float(x[3]) + offset, 2), round(float(x[4]) + offset, 2), float(x[5])]
+                        [
+                            int(x[0]),
+                            round(float(x[1]) + offset, 2),
+                            round(float(x[2]) + offset, 2),
+                            round(float(x[3]) + offset, 2),
+                            round(float(x[4]) + offset, 2),
+                            float(x[5]),
+                        ]
                         for x in rows
                     ]
-    except Exception:
-        pass
+    except Exception as e:
+        last_err = e
 
-    # 3) Gate.io API (Zaxira)
-    gate_sym_map = {"XAUUSDT": "PAXG_USDT", "BTCUSDT": "BTC_USDT", "EURUSDT": "EUR_USDT"}
-    url = "https://api.gateio.ws/api/v4/spot/candlesticks"
-    params = {"currency_pair": gate_sym_map.get(symbol, "PAXG_USDT"), "interval": timeframe, "limit": limit}
-    async with session.get(url, params=params, headers=HEADERS, timeout=10) as r:
-        r.raise_for_status()
-        rows = await r.json()
-        rows.sort(key=lambda x: int(x[0]))
-        return [
-            [int(x[0]) * 1000, round(float(x[5]) + offset, 2), round(float(x[3]) + offset, 2),
-             round(float(x[4]) + offset, 2), round(float(x[2]) + offset, 2), float(x[1])]
-            for x in rows
-        ]
+    # 3-BOSQICH: Gate.io API (AQSh serverlarida bloklanmaydi)
+    gate_sym_map = {
+        SYMBOL: "XAUT_USDT",
+        BTC_SYMBOL: "BTC_USDT",
+        EUR_SYMBOL: "EUR_USDT",
+    }
+    gate_tf_map = {
+        "1m": "1m", "5m": "5m", "15m": "15m", "30m": "30m",
+        "1h": "1h", "4h": "4h", "1d": "1d",
+    }
+    try:
+        url = "https://api.gateio.ws/api/v4/spot/candlesticks"
+        params = {
+            "currency_pair": gate_sym_map.get(symbol, "XAUT_USDT"),
+            "interval": gate_tf_map.get(timeframe, "15m"),
+            "limit": min(limit, 240),
+        }
+        async with session.get(url, params=params, headers=HEADERS, timeout=8) as r:
+            if r.status == 200:
+                rows = await r.json()
+                if rows and isinstance(rows, list):
+                    _ACTIVE_PROVIDER = "GATEIO"
+                    rows.sort(key=lambda x: int(x[0]))
+                    # Gate.io format: [ts_sec, quote_vol, close, high, low, open, base_vol]
+                    return [
+                        [
+                            int(x[0]) * 1000,
+                            round(float(x[5]) + offset, 2),
+                            round(float(x[3]) + offset, 2),
+                            round(float(x[4]) + offset, 2),
+                            round(float(x[2]) + offset, 2),
+                            float(x[1]),
+                        ]
+                        for x in rows
+                    ]
+    except Exception as e:
+        last_err = e
 
-# ==================== REAL-TIME WEBSOCKET LOOP ====================
+    # 4-BOSQICH: Kraken API (100% AQSh rasmiy birjasi — hech qachon 403 bermaydi)
+    kraken_sym_map = {
+        SYMBOL: "PAXGUSD",
+        BTC_SYMBOL: "XBTUSD",
+        EUR_SYMBOL: "EURUSD",
+    }
+    kraken_tf_map = {
+        "1m": 1, "5m": 5, "15m": 15, "30m": 30,
+        "1h": 60, "4h": 240, "1d": 1440,
+    }
+    try:
+        url = "https://api.kraken.com/0/public/OHLC"
+        params = {
+            "pair": kraken_sym_map.get(symbol, "PAXGUSD"),
+            "interval": kraken_tf_map.get(timeframe, 15),
+        }
+        async with session.get(url, params=params, headers=HEADERS, timeout=10) as r:
+            r.raise_for_status()
+            data = await r.json()
+            res = data.get("result", {})
+            pair_keys = [k for k in res.keys() if k != "last"]
+            if pair_keys:
+                rows = res[pair_keys[0]][-limit:]
+                if rows:
+                    _ACTIVE_PROVIDER = "KRAKEN"
+                    # Kraken format: [time_sec, open, high, low, close, vwap, volume, count]
+                    return [
+                        [
+                            int(x[0]) * 1000,
+                            round(float(x[1]) + offset, 2),
+                            round(float(x[2]) + offset, 2),
+                            round(float(x[3]) + offset, 2),
+                            round(float(x[4]) + offset, 2),
+                            float(x[6]),
+                        ]
+                        for x in rows
+                    ]
+    except Exception as e:
+        last_err = e
+
+    raise RuntimeError(f"Barcha API manbalaridan ma'lumot olib bo'lmadi: {last_err}")
+
+# ==================== REAL-TIME MULTI-EXCHANGE WEBSOCKET LOOP ====================
 async def bybit_ws_loop(app):
+    """
+    OKX, Gate.io va Bybit WebSocket orqali oltin narxini jonli oladi.
+    AQSh serverlarida ham uzluksiz ishlaydi.
+    """
     global _LIVE_BYBIT_RAW_PRICE, _LIVE_PRICE, _WS_CONNECTED, _LAST_WS_MONITOR_TS
     session = app["session"]
-    ws_urls = [
-        ("okx", "wss://ws.okx.com:8443/ws/v5/public"),
-        ("bybit", "wss://stream.bytick.com/v5/public/linear"),
+    providers = [
+        ("OKX", "wss://ws.okx.com:8443/ws/v5/public"),
+        ("GATEIO", "wss://api.gateio.ws/ws/v4/"),
+        ("BYBIT", BYBIT_WS_URL),
     ]
-    idx = 0
+    p_idx = 0
 
     while True:
-        provider, ws_url = ws_urls[idx % len(ws_urls)]
+        prov_name, ws_url = providers[p_idx % len(providers)]
+        if prov_name == "BYBIT" and _BYBIT_BLOCKED:
+            p_idx += 1
+            continue
+
         try:
             async with session.ws_connect(ws_url, heartbeat=20, timeout=15) as ws:
                 _WS_CONNECTED = True
-                if provider == "okx":
-                    await ws.send_json({"op": "subscribe", "args": [{"channel": "tickers", "instId": "XAU-USDT-SWAP"}]})
+                if prov_name == "OKX":
+                    await ws.send_json({
+                        "op": "subscribe",
+                        "args": [{"channel": "tickers", "instId": "XAUT-USDT-SWAP"}],
+                    })
+                elif prov_name == "GATEIO":
+                    await ws.send_json({
+                        "time": int(time.time()),
+                        "channel": "spot.tickers",
+                        "event": "subscribe",
+                        "payload": ["XAUT_USDT"],
+                    })
                 else:
                     await ws.send_json({"op": "subscribe", "args": [f"tickers.{SYMBOL}"]})
-                logger.info(f"⚡ Real-time WebSocket ulandi ({provider.upper()})!")
+
+                logger.info(f"⚡ Real-time WebSocket ulandi ({prov_name})!")
 
                 async for msg in ws:
                     if msg.type == aiohttp.WSMsgType.TEXT:
                         payload = json.loads(msg.data)
                         last_p_str = None
-                        if provider == "okx":
+                        if prov_name == "OKX":
                             arr = payload.get("data", [])
-                            if arr:
+                            if arr and isinstance(arr, list):
                                 last_p_str = arr[0].get("last")
+                        elif prov_name == "GATEIO":
+                            res = payload.get("result", {})
+                            if isinstance(res, dict):
+                                last_p_str = res.get("last")
                         else:
                             last_p_str = payload.get("data", {}).get("lastPrice")
 
@@ -683,8 +804,8 @@ async def bybit_ws_loop(app):
             raise
         except Exception as e:
             _WS_CONNECTED = False
-            idx += 1
-            logger.warning(f"WS uzildi ({provider}), 3s dan so'ng qayta ulanadi: {_safe_log_error(e)}")
+            p_idx += 1
+            logger.warning(f"WS ({prov_name}) qayta ulanmoqda: {_safe_log_error(e)}")
             await asyncio.sleep(3)
 
 # ==================== ADVANCED SMC & ICT ENGINE ====================
@@ -1032,10 +1153,6 @@ def calculate_vwap(candles, lookback=48):
 
 # ==================== 20$ SNIPER TRADE BUILDER ====================
 def build_sniper_trade(cl15, cl5, struct15, price, atr15, balance):
-    """
-    15m POI ichida 5m LTF sham/zona yordamida 20$ balansga mos
-    (1.20$ - 2.65$ SL) snayper bitim quradi.
-    """
     bias = struct15["bias"]
     all_zones_15m = [
         z for z in get_active_zones(cl15, "XAU_15m")
@@ -1063,13 +1180,11 @@ def build_sniper_trade(cl15, cl5, struct15, price, atr15, balance):
     max_sl_pts = SNIPER_MAX_SL_POINTS_SMALL if is_small_acc else (atr15 * 2.5 if atr15 else 6.0)
     min_sl_pts = SNIPER_MIN_SL_POINTS
 
-    # 5m oxirgi 4 ta shamning ekstremumi orqali tor Sniper SL topish
     recent_5m_low = min(c[L] for c in cl5[-4:]) if len(cl5) >= 4 else zone["bottom"]
     recent_5m_high = max(c[H] for c in cl5[-4:]) if len(cl5) >= 4 else zone["top"]
     entry = round(price, 2)
 
     if bias == "bullish":
-        # 5m swing low yoki 15m zona osti + 0.25$ bufer
         candidate_sl = max(zone["bottom"] - 0.30, recent_5m_low - 0.25)
         raw_risk = entry - candidate_sl
         risk = min(max(raw_risk, min_sl_pts), max_sl_pts)
@@ -1105,10 +1220,6 @@ def build_sniper_trade(cl15, cl5, struct15, price, atr15, balance):
         }
 
 def calc_xm_lot_and_risk(entry, sl, balance, risk_pct):
-    """
-    XM Standard/Ultra Low hisobi uchun:
-    0.01 lot = 1 troya unsiya (1$ harakat = 1$ PnL).
-    """
     bal = balance or DEFAULT_BALANCE_USD
     sl_dist = abs(entry - sl)
     if sl_dist <= 0:
@@ -1621,10 +1732,10 @@ async def run_bot_cycle(session):
         cl15 = closed_only(c15)
         cl5 = closed_only(c5)
 
-        # Agar WebSocket ishlayotgan bo'lsa jonli narxni olamiz, aks holda REST narxini
         rest_xm_price = round(c15[-1][C], 2)
-        if _LIVE_BYBIT_RAW_PRICE is None:
+        if not _WS_CONNECTED or _LIVE_BYBIT_RAW_PRICE is None:
             _LIVE_BYBIT_RAW_PRICE = round(rest_xm_price - _CURRENT_OFFSET, 2)
+            _LIVE_PRICE = rest_xm_price
         price = _LIVE_PRICE if (_WS_CONNECTED and _LIVE_PRICE) else rest_xm_price
 
         struct15 = analyze_market_structure(cl15, cache_key="XAU_15m")
@@ -1652,6 +1763,7 @@ async def run_bot_cycle(session):
             "atr15": round(atr15, 2) if atr15 else None,
             "offset": _CURRENT_OFFSET,
             "ws": _WS_CONNECTED,
+            "provider": _ACTIVE_PROVIDER,
             "time": time.strftime("%H:%M:%S"),
         }
         await db.state_set("last_status", status)
@@ -1737,7 +1849,6 @@ async def run_bot_cycle(session):
         new_trade["grade"] = grade
         new_trade["confirmations"] = ", ".join(confirmations)
 
-        # Gemini AI tahlili (agar GEMINI_API_KEY kiritilgan bo'lsa)
         ai_comment = await generate_ai_signal_review(session, new_trade, status, confirmations)
         ai_block = f"\n🧠 <b>Gemini AI Xulosasi:</b>\n<i>{html.escape(ai_comment)}</i>\n" if ai_comment else ""
 
@@ -1780,12 +1891,12 @@ async def run_bot_cycle(session):
 async def build_status_text():
     s = await db.state_get("last_status", {})
     if not s or s.get("price") is None:
-        return "⏳ Bot hali birinchi bozor tekshiruvini bajarmadi."
+        return "⏳ Bot bozor ma'lumotlarini yuklamoqda, 5 soniyadan so'ng qayta bosing."
     paused = await db.state_get("paused", False)
     t = await db.state_get("current_trade")
     acc = await get_account()
     live_p = _LIVE_PRICE if (_WS_CONNECTED and _LIVE_PRICE) else s["price"]
-    ws_badge = "⚡ WS Real-Time" if _WS_CONNECTED else "🔄 REST (5s)"
+    ws_badge = f"⚡ WS ({_ACTIVE_PROVIDER})" if _WS_CONNECTED else f"🔄 REST ({_ACTIVE_PROVIDER})"
 
     lines = [
         f"🤖 <b>XM GOLD SMC v14 TITANIUM</b> — {'⏸ PAUZADA' if paused else '🟢 FAOL'}",
@@ -1846,7 +1957,7 @@ async def build_ai_market_analysis(session, custom_question=None):
         return (
             "🧠 <b>Gemini AI hali yoqilmagan!</b>\n\n"
             "Uni yoqish uchun Google AI Studio (aistudio.google.com) dan bepul API key olib, "
-            "Railway <b>Variables</b> bo'limiga qo'shing:\n"
+            "Environment Variables bo'limiga qo'shing:\n"
             "<code>GEMINI_API_KEY = sizning_kalitingiz</code>"
         )
     s = await db.state_get("last_status", {})
@@ -1915,7 +2026,7 @@ async def _handle_update(app, upd):
         if not was:
             await send_telegram(
                 session,
-                "✅ <b>XM GOLD SMC v14 TITANIUM (Real-Time + AI + 20$ Sniper)</b>\n\n"
+                "✅ <b>XM GOLD SMC v14 TITANIUM (Anti-403 + AI + 20$ Sniper)</b>\n\n"
                 "📊 /signal — Jonli holat va MTF tahlil\n"
                 "🖼 /chart — 15m SMC Grafik chizmasi (PNG)\n"
                 "🧠 /ai — Gemini AI bozor tahlili\n"
@@ -1934,7 +2045,7 @@ async def _handle_update(app, upd):
         await send_telegram(session, await build_status_text(), with_keyboard=True, chat_id=cid)
     elif text in ("/chart", "🖼 Grafik"):
         if not _LAST_CANDLES_15M:
-            await send_telegram(session, "⏳ Grafik yuklanmoqda, 3 soniyadan so'ng bosing.", chat_id=cid)
+            await send_telegram(session, "⏳ Grafik yuklanmoqda, 5 soniyadan so'ng bosing.", chat_id=cid)
             return
         t = await db.state_get("current_trade")
         zones = get_active_zones(_LAST_CANDLES_15M, "XAU_15m")
@@ -1979,6 +2090,7 @@ async def _handle_update(app, upd):
             await send_telegram(
                 session,
                 f"✅ <b>XM bilan 100% sinxronlandi!</b>\n"
+                f"Manba: <b>{_ACTIVE_PROVIDER}</b>\n"
                 f"Yangi PRICE_OFFSET: <code>{_CURRENT_OFFSET:+.2f}$</code>\n"
                 f"Joriy bot narxi: <code>{_LIVE_PRICE:.2f}</code>",
                 chat_id=cid,
@@ -2056,7 +2168,7 @@ async def home(request):
     acc = await get_account()
     price = _LIVE_PRICE or s.get("price")
     price_disp = f"${price:,.2f}" if price else "---"
-    ws_txt = "⚡ WS Real-Time" if _WS_CONNECTED else "🔄 REST"
+    ws_txt = f"⚡ WS ({_ACTIVE_PROVIDER})" if _WS_CONNECTED else f"🔄 REST ({_ACTIVE_PROVIDER})"
 
     trade_html = "Ochiq bitim yo'q"
     if t:
@@ -2111,7 +2223,8 @@ async def home(request):
 async def health(request):
     return web.json_response({
         "status": "ok",
-        "version": "v14_titanium_realtime_ai",
+        "version": "v14_titanium_anti403_ai",
+        "provider": _ACTIVE_PROVIDER,
         "ws_connected": _WS_CONNECTED,
         "live_price": _LIVE_PRICE,
         "price_offset": _CURRENT_OFFSET,
@@ -2237,7 +2350,7 @@ async def startup_tasks(app):
     app["ws_task"] = asyncio.create_task(bybit_ws_loop(app), name="bybit_ws_loop")
     app["bot_task"] = asyncio.create_task(trading_loop(app), name="trading_loop")
     app["tg_task"] = asyncio.create_task(telegram_listener(app), name="tg_listener")
-    logger.info(f"✅ Bot ishga tushdi (v14 TITANIUM | Offset={_CURRENT_OFFSET:+.2f}$)")
+    logger.info(f"✅ Bot ishga tushdi (v14 TITANIUM Anti-403 | Offset={_CURRENT_OFFSET:+.2f}$)")
 
 async def cleanup_tasks(app):
     for key in ("ws_task", "bot_task", "tg_task"):
