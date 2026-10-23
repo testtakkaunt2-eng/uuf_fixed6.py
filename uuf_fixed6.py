@@ -687,50 +687,6 @@ async def bybit_ws_loop(app):
             logger.warning(f"WS uzildi ({provider}), 3s dan so'ng qayta ulanadi: {_safe_log_error(e)}")
             await asyncio.sleep(3)
 
-# ==================== REAL-TIME WEBSOCKET LOOP ====================
-async def bybit_ws_loop(app):
-    """
-    Bybit WebSocket orqali XAUUSDT narxini jonli (real-time, ~0.1s) oladi.
-    Ochiq bitim bo'lsa, darhol monitor_trade() ni ishga tushiradi.
-    """
-    global _LIVE_BYBIT_RAW_PRICE, _LIVE_PRICE, _WS_CONNECTED, _LAST_WS_MONITOR_TS
-    session = app["session"]
-
-    while True:
-        try:
-            async with session.ws_connect(BYBIT_WS_URL, heartbeat=20, timeout=15) as ws:
-                _WS_CONNECTED = True
-                await ws.send_json({"op": "subscribe", "args": [f"tickers.{SYMBOL}"]})
-                logger.info("⚡ Real-time Bybit WebSocket ulandi!")
-
-                async for msg in ws:
-                    if msg.type == aiohttp.WSMsgType.TEXT:
-                        payload = json.loads(msg.data)
-                        data = payload.get("data", {})
-                        last_p_str = data.get("lastPrice")
-                        if last_p_str:
-                            raw_p = float(last_p_str)
-                            _LIVE_BYBIT_RAW_PRICE = raw_p
-                            live_xm = round(raw_p + _CURRENT_OFFSET, 2)
-                            _LIVE_PRICE = live_xm
-                            _metrics["ws_ticks"] += 1
-
-                            now_mono = time.monotonic()
-                            if now_mono - _LAST_WS_MONITOR_TS >= 0.35:
-                                _LAST_WS_MONITOR_TS = now_mono
-                                trade = await db.state_get("current_trade")
-                                if trade:
-                                    b15 = _LAST_STRUCT_15M.get("bias")
-                                    await monitor_trade(session, live_xm, b15)
-                    elif msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR):
-                        break
-        except asyncio.CancelledError:
-            raise
-        except Exception as e:
-            _WS_CONNECTED = False
-            logger.warning(f"WS uzildi, 3s dan so'ng qayta ulanadi: {_safe_log_error(e)}")
-            await asyncio.sleep(3)
-
 # ==================== ADVANCED SMC & ICT ENGINE ====================
 def find_swings(candles, left=SWING_LEFT, right=SWING_RIGHT):
     highs, lows = [], []
