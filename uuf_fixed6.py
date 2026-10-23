@@ -1390,23 +1390,38 @@ async def monitor_trade(session, price, bias15):
         if to_close:
             await close_trade(session, trade, *to_close)
             await db.state_set("flip_counter", 0)
-
-# ==================== NEWS ====================
-_news_cache = {"events": None, "fetched_at": None}
-NEWS_CACHE_TTL_SEC = 3600
+          
+# ==================== NEWS (ANTI-429 COOLDOWN) ====================
+_news_cache = {"events": [], "fetched_at": None, "last_attempt": 0.0}
+NEWS_CACHE_TTL_SEC = 3600            # Muvaffaqiyatli yuklanganda 1 soat keshda turadi
+NEWS_RETRY_COOLDOWN_SEC = 900        # Xato bersa (429), 15 daqiqa qayta bezovta qilmaydi
 NEWS_CALENDAR_URL = "https://nfs.faireconomy.media/ff_calendar_thisweek.json"
 NEWS_BLOCK_MINUTES_BEFORE = 30
 NEWS_BLOCK_MINUTES_AFTER = 30
 
 async def fetch_high_impact_news(session):
     now = datetime.datetime.now(datetime.timezone.utc)
-    cached = _news_cache.get("events")
+    now_mono = time.monotonic()
+
+    cached = _news_cache.get("events") or []
     fetched_at = _news_cache.get("fetched_at")
-    if cached is not None and fetched_at and (now - fetched_at).total_seconds() < NEWS_CACHE_TTL_SEC:
+    last_attempt = _news_cache.get("last_attempt", 0.0)
+
+    # 1) Agar kesh yangi bo'lsa, tarmoqqa murojaat qilinmaydi
+    if fetched_at and (now - fetched_at).total_seconds() < NEWS_CACHE_TTL_SEC:
         return cached
+
+    # 2) Agar avval 429 xatosi bo'lgan bo'lsa, 15 daqiqa davomida so'rov yuborilmaydi
+    if now_mono - last_attempt < NEWS_RETRY_COOLDOWN_SEC:
+        return cached
+
+    _news_cache["last_attempt"] = now_mono
     events = []
     try:
-        async with session.get(NEWS_CALENDAR_URL, headers=HEADERS, timeout=10) as r:
+        async with session.get(NEWS_CALENDAR_URL, headers=HEADERS, timeout=8) as r:
+            if r.status == 429:
+                logger.warning("ForexFactory 429 limiti — yangiliklar 15 daqiqaga pauzaga qo'yildi.")
+                return cached
             r.raise_for_status()
             data = await r.json()
             for item in data:
@@ -1420,16 +1435,18 @@ async def fetch_high_impact_news(session):
                 except Exception:
                     continue
                 events.append({"title": item.get("title", "?"), "time": event_time})
+
         _news_cache["events"] = events
         _news_cache["fetched_at"] = now
         return events
     except Exception as e:
         logger.warning(f"News fetch xato: {_safe_log_error(e)}")
-        return cached if cached is not None else []
+        return cached
 
 async def is_news_blackout(session):
     now = datetime.datetime.now(datetime.timezone.utc)
-    for event in await fetch_high_impact_news(session):
+    events = await fetch_high_impact_news(session)
+    for event in events:
         delta = (event["time"] - now).total_seconds() / 60.0
         if -NEWS_BLOCK_MINUTES_AFTER <= delta <= NEWS_BLOCK_MINUTES_BEFORE:
             return True, event["title"]
