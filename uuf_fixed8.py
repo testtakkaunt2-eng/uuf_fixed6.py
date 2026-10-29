@@ -2557,7 +2557,7 @@ async def _handle_update(app, upd):
         await remove_sub(parts[1])
         await send_telegram(session, f"🚫 Ruxsat olib tashlandi: <code>{html.escape(parts[1])}</code>", chat_id=cid)
 
-# ==================== WEB ROUTES ====================
+# ==================== WEB ROUTES (TELEGRAM MINI APP UI) ====================
 routes = web.RouteTableDef()
 
 def _authorized(request):
@@ -2567,70 +2567,404 @@ def _authorized(request):
     tok = request.query.get("token") or request.headers.get("X-Token", "")
     return hmac.compare_digest(tok.encode("utf-8"), DASHBOARD_TOKEN.encode("utf-8"))
 
-@routes.get("/")
-async def home(request):
+@routes.get("/api/state")
+async def api_state(request):
     authed = _authorized(request)
     s = await db.state_get("last_status", {})
-    t = await db.state_get("current_trade")
+    t = await db.state_get("current_trade") if authed else None
     paused = await db.state_get("paused", False)
     price = live_price() or s.get("price")
-    price_disp = f"${price:,.2f}" if price else "---"
-    ws_txt = "⚡ WS Real-Time" if _WS_CONNECTED else "🔄 REST"
 
-    def v(key):
-        return html.escape(str(s.get(key) or "-"))
+    zones_out = []
+    if _LAST_CANDLES_15M and price:
+        z_list = sorted(get_active_zones(_LAST_CANDLES_15M, "XAU_15m"), key=lambda z: abs(price - z["ce"]))[:6]
+        for z in z_list:
+            zones_out.append({
+                "kind": z["kind"],
+                "type": z["type"],
+                "bottom": round(z["bottom"], 2),
+                "top": round(z["top"], 2),
+                "dist": round(abs(price - z["ce"]), 2),
+            })
 
-    private_html = ""
-    if authed:
-        acc = await get_account()
-        trade_html = "Ochiq bitim yo'q"
-        if t:
-            trade_html = (
-                f"<b>{html.escape(str(t['signal']))} [{html.escape(str(t.get('grade', 'A')))}]</b> | "
-                f"Entry: {t['entry']} | SL: {t['sl']} | TP1: {t['tp1']} | TP2: {t['tp2']}"
-            )
-        private_html = f"""
-    <hr>
-    <h3>Joriy Bitim</h3>
-    <div>{trade_html}</div>
-    <hr>
-    <div class="muted">Balans: ${acc.get('balance')} | Risk: {acc.get('risk_pct')}% | AI: {'Yoqilgan' if GEMINI_API_KEY else "O'chiq"}</div>
-    <div class="gold" style="margin-top:8px">{html.escape(await win_rate_text())}</div>"""
+    trade_out = None
+    if t and price:
+        is_long = t["signal"] == "LONG"
+        pnl_pts = round((price - t["entry"]) if is_long else (t["entry"] - price), 2)
+        lot = t.get("lot") or XM_MIN_LOT
+        pnl_usd = round((lot / XM_MIN_LOT) * pnl_pts * XM_OZ_PER_MIN_LOT, 2)
+        init_sl = t.get("initial_sl", t["sl"])
+        r_mult = round(pnl_pts / max(abs(t["entry"] - init_sl), 0.01), 2)
+        trade_out = {
+            "signal": t["signal"],
+            "grade": t.get("grade", "A"),
+            "score": t.get("score", 0),
+            "entry": t["entry"],
+            "sl": t["sl"],
+            "tp1": t["tp1"],
+            "tp2": t["tp2"],
+            "tp3": t.get("tp3", "-"),
+            "lot": lot,
+            "pnl_pts": pnl_pts,
+            "pnl_usd": pnl_usd,
+            "r_mult": r_mult,
+            "tp1_hit": bool(t.get("tp1_notified")),
+            "tp2_hit": bool(t.get("tp2_notified")),
+        }
 
-    html_page = f"""<!doctype html>
-<html lang="uz"><head>
+    results = await db.get_all_results() if authed else []
+    wins = sum(1 for r in results if _is_win_result(r))
+    losses = sum(1 for r in results if r == "SL")
+    be = len(results) - wins - losses
+    wr = round((wins / (wins + losses)) * 100, 1) if (wins + losses) > 0 else 0.0
+    acc = await get_account() if authed else {"balance": 0, "risk_pct": 0}
+    recent = await db.get_recent_trades(10) if authed else []
+
+    return web.json_response({
+        "price": price,
+        "ws": _WS_CONNECTED,
+        "paused": paused,
+        "market_open": market_open(),
+        "session": current_session(),
+        "offset": _CURRENT_OFFSET,
+        "status": s,
+        "trade": trade_out,
+        "zones": zones_out,
+        "account": acc,
+        "stats": {"total": len(results), "wins": wins, "losses": losses, "be": be, "wr": wr},
+        "recent": recent,
+        "ai_enabled": bool(GEMINI_API_KEY),
+    })
+
+@routes.get("/chart.png")
+async def web_chart_png(request):
+    if DASHBOARD_TOKEN and not _authorized(request):
+        return web.Response(status=403)
+    if not _LAST_CANDLES_15M:
+        return web.Response(status=404)
+    t = await db.state_get("current_trade")
+    zones = get_active_zones(_LAST_CANDLES_15M, "XAU_15m")
+    png = await render_chart_async(_LAST_CANDLES_15M, zones, _LAST_STRUCT_15M, trade=t)
+    if not png:
+        return web.Response(status=404)
+    return web.Response(body=png, content_type="image/png", headers={"Cache-Control": "no-store"})
+
+@routes.get("/")
+async def home(request):
+    html_page = """<!doctype html>
+<html lang="uz">
+<head>
 <meta charset="utf-8">
-<meta http-equiv="refresh" content="5">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>XM Gold SMC v16 TITANIUM</title>
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>XM GOLD SMC — Mini App</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800&family=JetBrains+Mono:wght@500;700&display=swap" rel="stylesheet">
 <style>
-  body {{ background:#0B0D12; color:#EDE3CF; font-family: monospace; padding:20px; margin:0; }}
-  .card {{ background:#141821; border:1px solid #2A3142; border-radius:14px;
-           padding:22px; max-width:480px; margin:auto; box-shadow: 0 8px 24px rgba(0,0,0,0.65); }}
-  h2 {{ font-size:2.3em; margin:4px 0 6px; color:#E4C047; }}
-  .tag {{ display:inline-block; padding:4px 10px; border-radius:8px;
-          background:#212736; margin:4px 4px 4px 0; font-size:0.85em; }}
-  hr {{ border:none; border-top:1px dashed #2A3142; margin:16px 0; }}
-  .muted {{ color:#949BA6; font-size:0.85em; }}
-  .gold {{ color:#E4C047; font-weight:bold; }}
+  :root {
+    --bg: #07090E;
+    --card: rgba(18, 23, 35, 0.78);
+    --border: rgba(255, 255, 255, 0.08);
+    --gold: #F3C65F;
+    --gold-glow: rgba(243, 198, 95, 0.18);
+    --bull: #10B981;
+    --bull-bg: rgba(16, 185, 129, 0.14);
+    --bear: #F43F5E;
+    --bear-bg: rgba(244, 63, 94, 0.14);
+    --text: #F1F5F9;
+    --muted: #8B95A5;
+  }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  body {
+    margin: 0; padding: 14px 14px 86px;
+    background: radial-gradient(circle at 50% -10%, rgba(243,198,95,0.14), transparent 55%), var(--bg);
+    color: var(--text); font-family: 'Inter', sans-serif; min-height: 100vh;
+  }
+  .mono { font-family: 'JetBrains Mono', monospace; }
+  .container { max-width: 460px; margin: 0 auto; }
+
+  /* Header */
+  .topbar { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }
+  .brand { display: flex; align-items: center; gap: 8px; font-weight: 800; font-size: 0.95rem; letter-spacing: 0.4px; }
+  .brand-dot { width: 9px; height: 9px; border-radius: 50%; background: var(--bull); box-shadow: 0 0 10px var(--bull); animation: pulse 1.8s infinite; }
+  @keyframes pulse { 0%, 100% { opacity: 1; transform: scale(1); } 50% { opacity: 0.45; transform: scale(0.85); } }
+  .pill { font-size: 0.72rem; font-weight: 600; padding: 4px 10px; border-radius: 999px; background: rgba(255,255,255,0.06); border: 1px solid var(--border); color: var(--muted); }
+
+  /* Cards */
+  .card {
+    background: var(--card); backdrop-filter: blur(16px); -webkit-backdrop-filter: blur(16px);
+    border: 1px solid var(--border); border-radius: 18px; padding: 16px;
+    margin-bottom: 12px; box-shadow: 0 10px 30px rgba(0,0,0,0.45);
+  }
+  .hero-card {
+    background: linear-gradient(145deg, rgba(28,34,48,0.9), rgba(14,18,28,0.92));
+    border: 1px solid rgba(243,198,95,0.28); position: relative; overflow: hidden;
+  }
+  .price-row { display: flex; justify-content: space-between; align-items: baseline; margin: 6px 0 10px; }
+  .price { font-size: 2.35rem; font-weight: 800; color: var(--gold); text-shadow: 0 0 22px var(--gold-glow); transition: color 0.25s; }
+  .sub-meta { font-size: 0.75rem; color: var(--muted); display: flex; gap: 10px; flex-wrap: wrap; }
+
+  /* MTF Grid */
+  .mtf-grid { display: grid; grid-template-columns: repeat(5, 1fr); gap: 6px; margin-top: 12px; }
+  .mtf-box {
+    background: rgba(255,255,255,0.03); border: 1px solid var(--border);
+    border-radius: 11px; padding: 7px 4px; text-align: center;
+  }
+  .mtf-tf { font-size: 0.68rem; color: var(--muted); font-weight: 600; }
+  .mtf-val { font-size: 0.74rem; font-weight: 800; margin-top: 3px; text-transform: uppercase; }
+  .bull { color: var(--bull); background: var(--bull-bg); border-color: rgba(16,185,129,0.3); }
+  .bear { color: var(--bear); background: var(--bear-bg); border-color: rgba(244,63,94,0.3); }
+
+  /* Levels Grid */
+  .section-title { font-size: 0.78rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.7px; color: var(--muted); margin: 0 0 10px; display: flex; justify-content: space-between; }
+  .lvl-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .lvl-item { background: rgba(255,255,255,0.03); border: 1px solid var(--border); border-radius: 12px; padding: 9px 11px; }
+  .lvl-label { font-size: 0.7rem; color: var(--muted); }
+  .lvl-val { font-size: 0.9rem; font-weight: 700; margin-top: 3px; }
+
+  /* Active Trade */
+  .trade-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; }
+  .side-badge { padding: 4px 10px; border-radius: 8px; font-weight: 800; font-size: 0.8rem; }
+  .pnl-box { font-size: 1.05rem; font-weight: 800; }
+  .tp-steps { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; margin-top: 10px; }
+  .tp-chip { background: rgba(255,255,255,0.04); border: 1px solid var(--border); border-radius: 10px; padding: 6px; text-align: center; font-size: 0.72rem; }
+  .tp-chip.hit { border-color: var(--bull); background: var(--bull-bg); color: var(--bull); }
+
+  /* Zones & Chart */
+  .zone-row { display: flex; justify-content: space-between; align-items: center; padding: 9px 11px; border-radius: 11px; background: rgba(255,255,255,0.03); border: 1px solid var(--border); margin-bottom: 7px; }
+  .chart-img { width: 100%; border-radius: 12px; border: 1px solid var(--border); display: block; }
+  .btn {
+    width: 100%; border: 1px solid rgba(243,198,95,0.35); background: rgba(243,198,95,0.12);
+    color: var(--gold); font-weight: 700; padding: 10px; border-radius: 12px; cursor: pointer; margin-top: 10px;
+  }
+
+  /* Bottom Navigation */
+  .nav {
+    position: fixed; bottom: 12px; left: 50%; transform: translateX(-50%);
+    width: calc(100% - 28px); max-width: 432px;
+    background: rgba(15, 20, 30, 0.92); backdrop-filter: blur(20px);
+    border: 1px solid rgba(255,255,255,0.1); border-radius: 16px;
+    display: grid; grid-template-columns: repeat(3, 1fr); padding: 5px; z-index: 99;
+  }
+  .nav-btn {
+    background: transparent; border: none; color: var(--muted);
+    padding: 9px 0; font-size: 0.76rem; font-weight: 700; border-radius: 12px; cursor: pointer;
+  }
+  .nav-btn.active { background: rgba(243,198,95,0.15); color: var(--gold); }
+  .tab-pane { display: none; }
+  .tab-pane.active { display: block; }
 </style>
-</head><body>
-  <div class="card">
-    <div class="muted">XM GOLD — SMC v16 TITANIUM ({ws_txt})</div>
-    <h2>{price_disp}</h2>
-    <div class="muted">Offset: {_CURRENT_OFFSET:+.2f}$ | Sessiya: {current_session()} | {'Bozor ochiq' if market_open() else 'Bozor yopiq'}</div>
-    <div style="margin-top:12px">
-      <span class="tag">{'⏸ Pauza' if paused else '🟢 Faol'}</span>
-      <span class="tag">5m: {v('b5')}</span>
-      <span class="tag">15m: {v('b15')}</span>
-      <span class="tag">1H: {v('b1h')}</span>
-      <span class="tag">4H: {v('b4h')}</span>
-      <span class="tag">1D: {v('b1d')}</span>
-      <span class="tag">EQ: {v('eq15')}</span>
-      <span class="tag">PDH/L: {v('pdh')}/{v('pdl')}</span>
-    </div>{private_html}
+</head>
+<body>
+<div class="container">
+  <div class="topbar">
+    <div class="brand"><span class="brand-dot" id="wsDot"></span> XM GOLD TITANIUM</div>
+    <span class="pill mono" id="wsBadge">⚡ WS LIVE</span>
   </div>
-</body></html>"""
+
+  <!-- TAB 1: TERMINAL -->
+  <div id="tab-terminal" class="tab-pane active">
+    <div class="card hero-card">
+      <div class="sub-meta">
+        <span id="mktState">🟢 Bozor ochiq</span>
+        <span>•</span>
+        <span id="sessName">Sessiya: -</span>
+        <span>•</span>
+        <span class="mono" id="offsetTxt">Offset: 0.00$</span>
+      </div>
+      <div class="price-row">
+        <div class="price mono" id="livePrice">$---.--</div>
+        <div class="pill mono" id="atrBadge">ATR: -</div>
+      </div>
+      <div class="mtf-grid" id="mtfGrid"></div>
+    </div>
+
+    <div class="card" id="tradeCard">
+      <div class="section-title"><span>🔥 Joriy Sniper Bitim</span><span class="mono" id="accBadge"></span></div>
+      <div id="tradeContent" style="color:var(--muted);font-size:0.85rem;">Ochiq bitim yo'q — 15m POI + 5m trigger kutilmoqda.</div>
+    </div>
+
+    <div class="card">
+      <div class="section-title"><span>🏛 ICT Likvidlik & Darajalar</span><span class="mono" id="event15Badge"></span></div>
+      <div class="lvl-grid">
+        <div class="lvl-item"><div class="lvl-label">15m EQ (50%)</div><div class="lvl-val mono" id="lvlEq">-</div></div>
+        <div class="lvl-item"><div class="lvl-label">ICT OTE Zona</div><div class="lvl-val mono" id="lvlOte">-</div></div>
+        <div class="lvl-item"><div class="lvl-label">Kecha PDH / PDL</div><div class="lvl-val mono" id="lvlPd">-</div></div>
+        <div class="lvl-item"><div class="lvl-label">Asia High / Low</div><div class="lvl-val mono" id="lvlAsia">-</div></div>
+        <div class="lvl-item"><div class="lvl-label">EQH (BSL Pool)</div><div class="lvl-val mono" id="lvlEqh">-</div></div>
+        <div class="lvl-item"><div class="lvl-label">EQL (SSL Pool)</div><div class="lvl-val mono" id="lvlEql">-</div></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- TAB 2: GRAFIK & ZONALAR -->
+  <div id="tab-zones" class="tab-pane">
+    <div class="card">
+      <div class="section-title"><span>🖼 15m SMC Jonli Grafik</span></div>
+      <img id="chartImg" class="chart-img" src="/chart.png" alt="15m SMC Chart">
+      <button class="btn" onclick="reloadChart()">🔄 Grafikni yangilash</button>
+    </div>
+    <div class="card">
+      <div class="section-title"><span>🎯 Faol 15m FVG / OB / BB Zonalar</span></div>
+      <div id="zonesList">Yuklanmoqda...</div>
+    </div>
+  </div>
+
+  <!-- TAB 3: STATISTIKA -->
+  <div id="tab-stats" class="tab-pane">
+    <div class="card">
+      <div class="section-title"><span>📈 Umumiy Natija (Win Rate)</span><span class="mono" id="wrPct">0%</span></div>
+      <div style="height:8px;background:rgba(255,255,255,0.07);border-radius:99px;overflow:hidden;margin-bottom:12px;">
+        <div id="wrBar" style="height:100%;width:0%;background:linear-gradient(90deg,var(--bull),var(--gold));transition:width 0.4s;"></div>
+      </div>
+      <div class="lvl-grid">
+        <div class="lvl-item"><div class="lvl-label">Yutuq (TP)</div><div class="lvl-val mono" style="color:var(--bull)" id="stWins">0</div></div>
+        <div class="lvl-item"><div class="lvl-label">Stop Loss (SL)</div><div class="lvl-val mono" style="color:var(--bear)" id="stLoss">0</div></div>
+      </div>
+    </div>
+    <div class="card">
+      <div class="section-title"><span>🕒 Oxirgi Yopilgan Bitimlar</span></div>
+      <div id="recentTrades" style="font-size:0.82rem;color:var(--muted);">Hali savdolar tarixi yo'q.</div>
+    </div>
+  </div>
+</div>
+
+<div class="nav">
+  <button class="nav-btn active" onclick="switchTab('terminal', this)">⚡ Terminal</button>
+  <button class="nav-btn" onclick="switchTab('zones', this)">🖼 Grafik & POI</button>
+  <button class="nav-btn" onclick="switchTab('stats', this)">📈 Statistika</button>
+</div>
+
+<script>
+  const tg = window.Telegram && window.Telegram.WebApp;
+  if (tg) { tg.ready(); tg.expand(); try { tg.setHeaderColor('#07090E'); tg.setBackgroundColor('#07090E'); } catch(e){} }
+
+  const urlParams = new URLSearchParams(window.location.search);
+  const tokenParam = urlParams.get('token') ? `?token=${encodeURIComponent(urlParams.get('token'))}` : '';
+  let lastPrice = null;
+
+  function switchTab(name, btn) {
+    document.querySelectorAll('.tab-pane').forEach(el => el.classList.remove('active'));
+    document.querySelectorAll('.nav-btn').forEach(el => el.classList.remove('active'));
+    document.getElementById('tab-' + name).classList.add('active');
+    btn.classList.add('active');
+    if (tg && tg.HapticFeedback) tg.HapticFeedback.selectionChanged();
+    if (name === 'zones') reloadChart();
+  }
+
+  function reloadChart() {
+    const img = document.getElementById('chartImg');
+    img.src = `/chart.png${tokenParam ? tokenParam + '&' : '?'}t=${Date.now()}`;
+  }
+
+  function biasClass(b) {
+    if (!b) return '';
+    return b.toLowerCase().includes('bull') ? 'bull' : (b.toLowerCase().includes('bear') ? 'bear' : '');
+  }
+
+  async function refreshState() {
+    try {
+      const res = await fetch('/api/state' + tokenParam);
+      if (!res.ok) return;
+      const d = await res.json();
+      const s = d.status || {};
+
+      // Price flash
+      const pEl = document.getElementById('livePrice');
+      if (d.price) {
+        pEl.textContent = '$' + Number(d.price).toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2});
+        if (lastPrice !== null && d.price !== lastPrice) {
+          pEl.style.color = d.price > lastPrice ? 'var(--bull)' : 'var(--bear)';
+          setTimeout(() => { pEl.style.color = 'var(--gold)'; }, 350);
+        }
+        lastPrice = d.price;
+      }
+
+      document.getElementById('wsDot').style.background = d.ws ? 'var(--bull)' : 'var(--gold)';
+      document.getElementById('wsBadge').textContent = d.ws ? '⚡ WS LIVE' : '🔄 REST 5s';
+      document.getElementById('mktState').textContent = d.paused ? '⏸ Pauzada' : (d.market_open ? '🟢 Bozor ochiq' : '🌙 Bozor yopiq');
+      document.getElementById('sessName').textContent = 'Sessiya: ' + (d.session || '-').toUpperCase();
+      document.getElementById('offsetTxt').textContent = `Offset: ${d.offset >= 0 ? '+' : ''}${Number(d.offset).toFixed(2)}$`;
+      document.getElementById('atrBadge').textContent = 'ATR: ' + (s.atr15 ? s.atr15 + '$' : '-');
+      document.getElementById('event15Badge').textContent = s.event15 || '';
+
+      // MTF Grid
+      const tfs = [['5m', s.b5], ['15m', s.b15], ['1H', s.b1h], ['4H', s.b4h], ['1D', s.b1d]];
+      document.getElementById('mtfGrid').innerHTML = tfs.map(([label, val]) => {
+        const cls = biasClass(val);
+        const shortVal = val ? (val === 'bullish' ? '▲ BULL' : '▼ BEAR') : '—';
+        return `<div class="mtf-box ${cls}"><div class="mtf-tf">${label}</div><div class="mtf-val">${shortVal}</div></div>`;
+      }).join('');
+
+      // Levels
+      document.getElementById('lvlEq').textContent = s.eq15 || '-';
+      document.getElementById('lvlOte').textContent = (s.ote_bottom && s.ote_top) ? `${s.ote_bottom}-${s.ote_top}` : '-';
+      document.getElementById('lvlPd').textContent = `${s.pdh || '-'} / ${s.pdl || '-'}`;
+      document.getElementById('lvlAsia').textContent = `${s.asia_high || '-'} / ${s.asia_low || '-'}`;
+      document.getElementById('lvlEqh').textContent = s.eqh || '-';
+      document.getElementById('lvlEql').textContent = s.eql || '-';
+
+      // Account & Trade
+      if (d.account && d.account.balance) {
+        document.getElementById('accBadge').textContent = `$${d.account.balance} (${d.account.risk_pct}%)`;
+      }
+      const tc = document.getElementById('tradeContent');
+      if (d.trade) {
+        const t = d.trade;
+        const isLong = t.signal === 'LONG';
+        const pnlCol = t.pnl_usd >= 0 ? 'var(--bull)' : 'var(--bear)';
+        tc.innerHTML = `
+          <div class="trade-head">
+            <span class="side-badge ${isLong ? 'bull' : 'bear'}">${isLong ? '🟢 LONG' : '🔴 SHORT'} [${t.grade}] (${t.lot} lot)</span>
+            <span class="pnl-box mono" style="color:${pnlCol}">${t.pnl_usd >= 0 ? '+' : ''}${t.pnl_usd}$ (${t.r_mult >= 0 ? '+' : ''}${t.r_mult}R)</span>
+          </div>
+          <div class="tp-steps mono">
+            <div class="tp-chip"><div>ENTRY</div><b>${t.entry}</b></div>
+            <div class="tp-chip" style="color:var(--bear)"><div>SL</div><b>${t.sl}</b></div>
+            <div class="tp-chip ${t.tp1_hit ? 'hit' : ''}"><div>TP1</div><b>${t.tp1}</b></div>
+            <div class="tp-chip ${t.tp2_hit ? 'hit' : ''}"><div>TP2</div><b>${t.tp2}</b></div>
+          </div>`;
+      } else {
+        tc.innerHTML = `🔍 Ochiq bitim yo'q — 15m POI + 5m Sniper trigger kutilmoqda.`;
+      }
+
+      // Zones
+      const zl = document.getElementById('zonesList');
+      if (d.zones && d.zones.length) {
+        zl.innerHTML = d.zones.map(z => {
+          const isBull = z.type === 'bullish';
+          return `<div class="zone-row">
+            <div><span class="side-badge ${isBull ? 'bull' : 'bear'}">${z.kind} ${z.type.toUpperCase()}</span></div>
+            <div class="mono" style="font-size:0.84rem"><b>${z.bottom} - ${z.top}</b> <span style="color:var(--muted)">(${z.dist}$)</span></div>
+          </div>`;
+        }).join('');
+      } else {
+        zl.innerHTML = `<div style="color:var(--muted);font-size:0.84rem">Hozircha faol 15m zonalar topilmadi.</div>`;
+      }
+
+      // Stats
+      if (d.stats) {
+        document.getElementById('wrPct').textContent = `${d.stats.wr}% (${d.stats.total} ta)`;
+        document.getElementById('wrBar').style.width = `${d.stats.wr}%`;
+        document.getElementById('stWins').textContent = `${d.stats.wins} ✅ (BE: ${d.stats.be})`;
+        document.getElementById('stLoss').textContent = `${d.stats.losses} ❌`;
+      }
+      if (d.recent && d.recent.length) {
+        document.getElementById('recentTrades').innerHTML = d.recent.map(r => {
+          const win = r.result && (r.result.includes('TP') || r.result === 'BE+');
+          return `<div class="zone-row mono">
+            <span><b>${r.signal}</b> @ ${r.entry}</span>
+            <span style="color:${win ? 'var(--bull)' : 'var(--bear)'}"><b>${r.result}</b> (${r.close_price})</span>
+          </div>`;
+        }).join('');
+      }
+    } catch (e) {}
+  }
+
+  refreshState();
+  setInterval(refreshState, 2000);
+</script>
+</body>
+</html>"""
     return web.Response(text=html_page, content_type="text/html")
 
 @routes.get("/health")
