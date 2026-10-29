@@ -516,6 +516,76 @@ async def _send_ai_followup(session, trade, status, confirmations):
     except Exception as e:
         logger.warning(f"AI follow-up xato: {_safe_log_error(e)}")
 
+async def _ai_post_mortem(session, trade, sl_price):
+    """SL urilgandan 15 daqiqa o'tib, bozor qayerga ketganini ko'radi va xatoni tahlil qiladi."""
+    try:
+        await asyncio.sleep(900)  # 15 daqiqa (1 ta 15m sham yopilishini) kutadi
+        if not GEMINI_API_KEY or not _LAST_CANDLES_15M:
+            return
+        now_p = live_price() or _LAST_CANDLES_15M[-1][C]
+        sys_prompt = (
+            "Sen institutsional SMC/ICT mentorisan. Oltin (XAUUSD) bitimi Stop Loss bo'ldi. "
+            "15 daqiqadan keyingi narxga qarab, SL sababini 2-3 jumlada aniq tushuntir: "
+            "bu Inducement/Liquidity Sweep bo'ldimi (narx SL ni olib TP tomonga qaytdimi) "
+            "yoki haqiqiy Trend o'zgarishimi (narx SL tomonga ketishda davom etdimi)? "
+            "Keyingi safar nima qilish kerakligini yoz."
+        )
+        prompt = (
+            f"Bitim: {trade['signal']} | Entry: {trade['entry']} | SL urildi: {sl_price}\n"
+            f"TP1: {trade['tp1']} | Zona: 15m {trade.get('zone_kind')} ({trade.get('zone_bottom')}-{trade.get('zone_top')})\n"
+            f"Tasdiqlar: {trade.get('confirmations', '-')}\n"
+            f"SL dan 15 daqiqa keyingi joriy narx: {now_p} (15m bias: {_LAST_STRUCT_15M.get('bias')})"
+        )
+        txt = await ask_gemini_ai(session, prompt, system_instruction=sys_prompt)
+        if txt:
+            await send_telegram(
+                session,
+                f"🧬 <b>AI Post-Mortem (SL Ekspertizasi — {trade['signal']}):</b>\n"
+                f"SL narx: <code>{sl_price}</code> ➡️ 15m keyin: <code>{now_p}</code>\n\n"
+                f"<i>{html.escape(txt)}</i>",
+            )
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:
+        logger.warning(f"Post-mortem xato: {_safe_log_error(e)}")
+
+async def get_learned_adjustments(current_confs):
+    """SQLite bazadagi oxirgi 60 ta bitimdan qaysi tasdiqlar ko'p SL/TP berganini hisoblaydi."""
+    async with db._lock:
+        async with db._conn.execute(
+            "SELECT result, confirmations FROM trades WHERE confirmations IS NOT NULL ORDER BY id DESC LIMIT 60"
+        ) as cur:
+            rows = await cur.fetchall()
+    if len(rows) < 5:
+        return 0, []
+
+    stats = {}
+    for res, conf_str in rows:
+        is_win = _is_win_result(res)
+        is_loss = (res == "SL")
+        if not (is_win or is_loss):
+            continue
+        for tag in (conf_str or "").split(", "):
+            tag = tag.strip()
+            if not tag or "Xotira:" in tag:
+                continue
+            w, l = stats.get(tag, (0, 0))
+            stats[tag] = (w + (1 if is_win else 0), l + (1 if is_loss else 0))
+
+    adj, notes = 0, []
+    for c in list(current_confs):
+        w, l = stats.get(c, (0, 0))
+        total = w + l
+        if total >= 4:  # Kamida 4 marta qatnashgan bo'lsa xulosa chiqaradi
+            wr = w / total
+            if wr <= 0.35:
+                adj -= 6
+                notes.append(f"🧠Xotira: {c} ko'p SL (-6)")
+            elif wr >= 0.70:
+                adj += 5
+                notes.append(f"🧠Xotira: {c} yuqori WR (+5)")
+    return max(-15, min(15, adj)), notes
+
 # ==================== PURE-PYTHON PNG CHART RENDERER ====================
 _FONT_5X7 = {
     " ": [0, 0, 0, 0, 0, 0, 0],
@@ -1497,6 +1567,8 @@ async def close_trade(session, trade, result, price):
         f"💰 <b>Natija ({lot} lot, to'liq pozitsiya):</b> <code>{pnl_usd:+.2f}$</code> ({r_mult:+.2f}R)\n"
         f"📊 {html.escape(stat)}",
     )
+    if result == "SL" and GEMINI_API_KEY:
+        _spawn(_ai_post_mortem(session, dict(trade), price))
 
 async def monitor_trade(session, price, bias15):
     global _flip_since, _flip_last_warn
@@ -1998,6 +2070,60 @@ def evaluate_institutional_score(
     grade = "A+" if score >= 80 else ("A" if score >= 68 else "B+")
     return score, grade, confs
 
+_dxy_cache = {"ts": 0.0, "dxy_bias": None, "us10y_bias": None, "dxy_smt": None}
+
+async def _fetch_yahoo_15m(session, ticker):
+    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}"
+    async with session.get(url, params={"interval": "15m", "range": "5d"}, headers=HEADERS, timeout=T(8)) as r:
+        r.raise_for_status()
+        res = (await r.json())["chart"]["result"][0]
+        ts_list = res.get("timestamp", [])
+        q = res["indicators"]["quote"][0]
+        out = []
+        for i, t_sec in enumerate(ts_list):
+            o, h, l, c = q["open"][i], q["high"][i], q["low"][i], q["close"][i]
+            if None not in (o, h, l, c):
+                out.append([int(t_sec * 1000), float(o), float(h), float(l), float(c), 0.0])
+        return closed_only(out)
+
+def detect_inverse_dxy_smt(gold_candles, dxy_candles):
+    """Oltin va DXY teskari yuradi: Oltin yangi Low qilganda DXY yangi High qila olmasa -> Bullish SMT."""
+    if not gold_candles or not dxy_candles:
+        return None
+    gh, gl = get_swings_cached(gold_candles, cache_key="XAU_15m")
+    dh, dl = get_swings_cached(dxy_candles, cache_key="DXY_15m")
+    max_gap = 3 * 15 * 60 * 1000
+    if len(gl) >= 2 and dh:
+        t1, t2 = gold_candles[gl[-2][0]][0], gold_candles[gl[-1][0]][0]
+        d1, d2 = _swing_near(dh, dxy_candles, t1, max_gap), _swing_near(dh, dxy_candles, t2, max_gap)
+        if d1 is not None and d2 is not None and gl[-1][1] < gl[-2][1] and d2 < d1:
+            return "bullish"
+    if len(gh) >= 2 and dl:
+        t1, t2 = gold_candles[gh[-2][0]][0], gold_candles[gh[-1][0]][0]
+        d1, d2 = _swing_near(dl, dxy_candles, t1, max_gap), _swing_near(dl, dxy_candles, t2, max_gap)
+        if d1 is not None and d2 is not None and gh[-1][1] > gh[-2][1] and d2 > d1:
+            return "bearish"
+    return None
+
+async def get_macro_dxy_context(session, gold_cl15):
+    now_m = time.monotonic()
+    if now_m - _dxy_cache["ts"] < 120:
+        return _dxy_cache
+    dxy_c, tnx_c = await asyncio.gather(
+        _fetch_yahoo_15m(session, "DX-Y.NYB"),
+        _fetch_yahoo_15m(session, "^TNX"),
+        return_exceptions=True,
+    )
+    dxy_ok = dxy_c if not isinstance(dxy_c, Exception) else None
+    tnx_ok = tnx_c if not isinstance(tnx_c, Exception) else None
+    _dxy_cache.update({
+        "ts": now_m,
+        "dxy_bias": confirmed_structure_bias(dxy_ok, cache_key="DXY_15m") if dxy_ok else _dxy_cache["dxy_bias"],
+        "us10y_bias": confirmed_structure_bias(tnx_ok, cache_key="TNX_15m") if tnx_ok else _dxy_cache["us10y_bias"],
+        "dxy_smt": detect_inverse_dxy_smt(gold_cl15, dxy_ok) if dxy_ok else None,
+    })
+    return _dxy_cache
+
 # ==================== MAIN CYCLE ====================
 async def _fetch_corr(session, symbol, key):
     """BTC/EUR 15m. Xato bo'lsa simbol 10 daqiqaga o'chiriladi (har siklda 2+ soniya kechikmasligi uchun)."""
@@ -2127,6 +2253,38 @@ async def run_bot_cycle(session):
             btc_bias, eur_bias, smt_eur, smt_btc, new_trade.get("confluence", False),
             sweep15, pd_asia, eqh, eql, delta15, vp15, session_name
         )
+
+        # --- 6. DXY & US10Y Teskari Korrelyatsiya ---
+        if b15 in ("bullish", "bearish"):
+            try:
+                macro = await get_macro_dxy_context(session, cl15)
+                opp_bias = "bearish" if b15 == "bullish" else "bullish"
+                if macro["dxy_smt"] == b15:
+                    score += 10
+                    confirmations.append(f"DXY Inverse SMT ({b15.upper()})")
+                if macro["dxy_bias"] == opp_bias:
+                    score += 6
+                    confirmations.append(f"DXY {opp_bias.upper()} (Oltin foydasiga)")
+                elif macro["dxy_bias"] == b15:
+                    score -= 8
+                    confirmations.append("⚠️ DXY qarama-qarshi (-8)")
+                if macro["us10y_bias"] == opp_bias:
+                    score += 4
+                    confirmations.append(f"US10Y {opp_bias.upper()}")
+            except Exception as e:
+                logger.warning(f"DXY/US10Y konteksti xato: {_safe_log_error(e)}")
+
+        # --- 5. AI Xotira (O'z-o'zini o'qitish filtri) ---
+        try:
+            mem_adj, mem_notes = await get_learned_adjustments(confirmations)
+            if mem_adj != 0:
+                score += mem_adj
+                confirmations.extend(mem_notes)
+        except Exception as e:
+            logger.warning(f"Xotira filtri xato: {_safe_log_error(e)}")
+
+        score = max(0, min(score, 100))
+        grade = "A+" if score >= 80 else ("A" if score >= 68 else "B+")
 
         if score < MIN_SIGNAL_SCORE:
             return
