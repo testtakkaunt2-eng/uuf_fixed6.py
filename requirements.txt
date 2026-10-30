@@ -1,3 +1,8 @@
-aiohttp>=3.9
-aiosqlite>=0.19
-gunicorn>=21.2
+aiohttp
+aiosqlite
+cryptography
+ccxt
+MetaTrader5
+python-dotenv
+matplotlib
+pandas
