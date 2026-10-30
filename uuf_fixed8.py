@@ -3681,7 +3681,7 @@ async def on_cleanup(app):
         except Exception:
             pass
 
-def create_app():
+async def create_app():
     app = web.Application()
     app.router.add_get("/", handle_index)
     app.router.add_get("/webapp", handle_index)
