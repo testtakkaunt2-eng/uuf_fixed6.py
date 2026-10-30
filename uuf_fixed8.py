@@ -3683,10 +3683,18 @@ async def on_cleanup(app):
 
 def create_app():
     app = web.Application()
-    ...
+    app.router.add_get("/", handle_index)
+    app.router.add_get("/webapp", handle_index)
+    app.router.add_get("/health", handle_health)
+    app.router.add_get("/api/state", handle_api_state)
+    app.router.add_post("/api/action", handle_api_action)
+    app.router.add_get("/api/mt5_bridge/poll", handle_mt5_bridge_poll)
+    app.router.add_post("/webhook", handle_webhook)
+    app.on_startup.append(on_startup)
+    app.on_cleanup.append(on_cleanup)
     return app
 
-app = create_app()   # modul darajasida ham mavjud bo'ladi
+app = create_app()   # <-- QO'SHILDI: modul darajasida app obyekti
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
