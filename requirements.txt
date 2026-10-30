@@ -2,7 +2,8 @@ aiohttp
 aiosqlite
 cryptography
 ccxt
-MetaTrader5
+gunicorn
+MetaTrader5; sys_platform == 'win32'
 python-dotenv
 matplotlib
 pandas

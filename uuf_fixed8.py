@@ -34,6 +34,12 @@ import urllib.parse
 import zlib
 
 try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
+
+try:
     from cryptography.fernet import Fernet
     _HAS_CRYPTO = True
 except ImportError:
@@ -3681,6 +3687,12 @@ async def on_cleanup(app):
         except Exception:
             pass
 
+async def handle_index(request):
+    html_path = os.path.join(BASE_DIR, "webapp", "index.html")
+    if os.path.exists(html_path):
+        return web.FileResponse(html_path)
+    return web.Response(text=MINI_APP_HTML, content_type="text/html")
+
 def create_app():
     app = web.Application()
     app.router.add_get("/", handle_index)
@@ -3690,11 +3702,16 @@ def create_app():
     app.router.add_post("/api/action", handle_api_action)
     app.router.add_get("/api/mt5_bridge/poll", handle_mt5_bridge_poll)
     app.router.add_post("/webhook", handle_webhook)
+
+    webapp_dir = os.path.join(BASE_DIR, "webapp")
+    if os.path.exists(webapp_dir):
+        app.router.add_static("/", webapp_dir)
+
     app.on_startup.append(on_startup)
     app.on_cleanup.append(on_cleanup)
     return app
 
-app = create_app()   # <-- QO'SHILDI: modul darajasida app obyekti
+app = create_app()
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
