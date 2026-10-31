@@ -98,7 +98,7 @@ SWING_LEFT, SWING_RIGHT = 3, 3
 CHECK_INTERVAL_SEC = 5
 ZONE_MAX_DISTANCE_PCT = 0.05
 ZONE_TOL_MAX_POINTS = 1.5
-MIN_SIGNAL_SCORE = 65
+MIN_SIGNAL_SCORE = 55
 TRADE_STALE_WARNING_HOURS = 6
 FLIP_WARN_AFTER_SEC = 60
 FLIP_WARN_REPEAT_SEC = 300
@@ -107,7 +107,7 @@ ASIA_END_HOUR_UTC = 6
 AI_COOLDOWN_SEC = 20
 CHART_COOLDOWN_SEC = 10
 XM_SPREAD_BUFFER = 0.30
-SNIPER_SKIP_IF_SL_TOO_WIDE = True
+SNIPER_SKIP_IF_SL_TOO_WIDE = False
 FVG_REQUIRE_UNTESTED = True
 NEWS_RETRY_SEC = 300
 
@@ -148,7 +148,7 @@ DB_FILE = os.path.join(DATA_DIR, "gold_bot.sqlite")
 
 HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
 
-KILLZONES_ENABLED = True
+KILLZONES_ENABLED = False
 KILLZONES = [
     {"name": "London Open", "start": datetime.time(6, 0), "end": datetime.time(12, 0)},
     {"name": "NY Open / Overlap", "start": datetime.time(12, 0), "end": datetime.time(17, 0)},
