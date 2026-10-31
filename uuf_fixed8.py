@@ -93,29 +93,29 @@ BYBIT_WS_URL = os.environ.get("BYBIT_WS_URL", "wss://stream.bybit.com/v5/public/
 LIMIT = 240
 HTF_LIMIT = 120
 
-RR1, RR2, RR3 = 1.5, 3.0, 4.5
+RR1, RR2, RR3 = 1.2, 2.2, 3.2
 SWING_LEFT, SWING_RIGHT = 3, 3
 CHECK_INTERVAL_SEC = 5
-ZONE_MAX_DISTANCE_PCT = 0.05
-ZONE_TOL_MAX_POINTS = 1.5
-MIN_SIGNAL_SCORE = 55
-TRADE_STALE_WARNING_HOURS = 6
+ZONE_MAX_DISTANCE_PCT = 0.08
+ZONE_TOL_MAX_POINTS = 2.5
+MIN_SIGNAL_SCORE = 58
+TRADE_STALE_WARNING_HOURS = 4
 FLIP_WARN_AFTER_SEC = 60
 FLIP_WARN_REPEAT_SEC = 300
 LIVE_PRICE_MAX_AGE_SEC = 10
 ASIA_END_HOUR_UTC = 6
 AI_COOLDOWN_SEC = 20
 CHART_COOLDOWN_SEC = 10
-XM_SPREAD_BUFFER = 0.30
-SNIPER_SKIP_IF_SL_TOO_WIDE = False
-FVG_REQUIRE_UNTESTED = True
+XM_SPREAD_BUFFER = 0.25
+SNIPER_SKIP_IF_SL_TOO_WIDE = True
+FVG_REQUIRE_UNTESTED = False
 NEWS_RETRY_SEC = 300
 
 DEFAULT_BALANCE_USD = 20.0
 DEFAULT_RISK_PER_TRADE_PCT = 10.0
 MAX_RISK_PER_TRADE_PCT = 25.0
 SNIPER_MIN_SL_POINTS = 1.20
-SNIPER_MAX_SL_POINTS_SMALL = 2.65
+SNIPER_MAX_SL_POINTS_SMALL = 4.20
 
 XM_MIN_LOT = 0.01
 XM_OZ_PER_MIN_LOT = 1.0
@@ -148,10 +148,11 @@ DB_FILE = os.path.join(DATA_DIR, "gold_bot.sqlite")
 
 HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
 
-KILLZONES_ENABLED = False
+KILLZONES_ENABLED = True
 KILLZONES = [
+    {"name": "Asia Sweep / Pre-London", "start": datetime.time(2, 0), "end": datetime.time(6, 0)},
     {"name": "London Open", "start": datetime.time(6, 0), "end": datetime.time(12, 0)},
-    {"name": "NY Open / Overlap", "start": datetime.time(12, 0), "end": datetime.time(17, 0)},
+    {"name": "NY Open / Overlap", "start": datetime.time(12, 0), "end": datetime.time(20, 0)},
 ]
 SESSION_TZ = {
     "asia": "Asia/Tokyo",
@@ -1708,7 +1709,7 @@ def check_5m_ltf_trigger(cl5, struct5, target_bias, zone=None):
     if struct5["bias"] == target_bias:
         ev = struct5.get("event") or ""
         ev_bar = struct5.get("event_bar", -1)
-        if ev_bar >= 0 and (len(cl5) - 1 - ev_bar) <= 6:
+        if ev_bar >= 0 and (len(cl5) - 1 - ev_bar) <= 10:
             if "CHoCH" in ev:
                 triggers.append("5m CHoCH (MSS)")
             elif "BOS" in ev:
@@ -1729,7 +1730,7 @@ def check_5m_ltf_trigger(cl5, struct5, target_bias, zone=None):
         lower_wick = min(last[O], last[C]) - last[L]
         touches = True
         if zone is not None:
-            touches = last[L] <= zone["top"] + 0.5 and last[H] >= zone["bottom"] - 0.5
+            touches = last[L] <= zone["top"] + 1.2 and last[H] >= zone["bottom"] - 1.2
 
         if touches:
             if target_bias == "bullish":
@@ -2031,8 +2032,8 @@ def evaluate_institutional_score(
         score += 10
         confs.append("ICT Premium (>50% EQ)")
     elif eq and ((bias == "bullish" and price > eq) or (bias == "bearish" and price < eq)):
-        score -= 15
-        confs.append("⚠️ Premium/Discount noto'g'ri tomonda (-15)")
+        score -= 5
+        confs.append("⚠️ Trend Continuation (Premium/Discount -5)")
 
     if bias == "bullish":
         if pd_asia_info.get("bull_sweep"):
@@ -2181,7 +2182,9 @@ async def _fetch_corr(session, symbol, key):
 # ==================== 20$ SNIPER TRADE BUILDER ====================
 def build_sniper_trade(cl15, cl5, struct15, price, atr15, balance):
     bias = struct15["bias"]
-    zones_bias = [z for z in get_active_zones(cl15, "XAU_15m") if z["type"] == bias]
+    zones_15m = [z for z in get_active_zones(cl15, "XAU_15m") if z["type"] == bias]
+    zones_5m = [z for z in get_active_zones(cl5, "XAU_5m") if z["type"] == bias]
+    zones_bias = zones_15m + zones_5m
     if not zones_bias:
         return None
 
@@ -2913,9 +2916,14 @@ async def scanner_loop(app):
             trade = await db.state_get("current_trade")
             if trade:
                 await monitor_trade(session, price, status["b15"])
-            else:
-                # 3) Yangi Sniper signal tekshirish
-                cand = status.get("candidate")
+                trade = await db.state_get("current_trade")
+
+            # 3) Yangi Sniper signal tekshirish (bitim yo'q bo'lsa YOKI avvalgisi TP1 olib BE+ ga o'tgan bo'lsa)
+            cand = status.get("candidate")
+            can_open_new = (trade is None) or (
+                trade.get("tp1_notified") and cand and cand.get("signal") == trade.get("signal")
+            )
+            if can_open_new:
                 cur_bar_ts = cl15[-1][0] if cl15 else 0
                 if (
                     cand
@@ -2925,30 +2933,37 @@ async def scanner_loop(app):
                     and cur_bar_ts != last_signal_bar_ts
                 ):
                     async with _monitor_lock:
-                        existing = await db.state_get("current_trade")
-                        if not existing:
-                            await db.state_set("current_trade", cand)
-                            last_signal_bar_ts = cur_bar_ts
-                            _metrics["signals"] += 1
-                            acc = await get_account()
-                            msg = format_signal_message(cand, status, acc)
-                            await send_telegram(session, msg, with_keyboard=True)
+                        if trade and trade.get("tp1_notified"):
+                            await db.insert_trade(
+                                trade, "TP1", price,
+                                trade.get("lot", XM_MIN_LOT),
+                                trade.get("risk_usd", 0.0),
+                                trade.get("confirmations", ""),
+                            )
+                            _metrics["closed"] += 1
+                            _metrics["wins"] += 1
+                        await db.state_set("current_trade", cand)
+                        last_signal_bar_ts = cur_bar_ts
+                        _metrics["signals"] += 1
+                        acc = await get_account()
+                        msg = format_signal_message(cand, status, acc)
+                        await send_telegram(session, msg, with_keyboard=True)
 
-                            # Grafik yuborish
-                            png = await render_chart_async(cl15, status["zones15"], status["struct15"], trade=cand)
-                            if png:
-                                await send_telegram_photo(
-                                    session, png,
-                                    caption=f"🎯 <b>{cand['signal']} @ {cand['entry']}</b> | SL: {cand['sl']} | TP1: {cand['tp1']} | TP2: {cand['tp2']}",
-                                )
+                        # Grafik yuborish
+                        png = await render_chart_async(cl15, status["zones15"], status["struct15"], trade=cand)
+                        if png:
+                            await send_telegram_photo(
+                                session, png,
+                                caption=f"🎯 <b>{cand['signal']} @ {cand['entry']}</b> | SL: {cand['sl']} | TP1: {cand['tp1']} | TP2: {cand['tp2']}",
+                            )
 
-                            # Exness & Binance avto-savdo
-                            _spawn(execute_exness_autotrades(session, dict(cand)))
-                            _spawn(execute_binance_autotrades(session, dict(cand)))
+                        # Exness & Binance avto-savdo
+                        _spawn(execute_exness_autotrades(session, dict(cand)))
+                        _spawn(execute_binance_autotrades(session, dict(cand)))
 
-                            # Gemini AI sharhi
-                            if GEMINI_API_KEY:
-                                _spawn(_send_ai_followup(session, dict(cand), dict(status), list(status["confirmations"])))
+                        # Gemini AI sharhi
+                        if GEMINI_API_KEY:
+                            _spawn(_send_ai_followup(session, dict(cand), dict(status), list(status["confirmations"])))
 
         except asyncio.CancelledError:
             raise
