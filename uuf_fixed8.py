@@ -93,7 +93,7 @@ BYBIT_WS_URL = os.environ.get("BYBIT_WS_URL", "wss://stream.bybit.com/v5/public/
 LIMIT = 240
 HTF_LIMIT = 120
 
-RR1, RR2, RR3 = 1.2, 2.2, 3.2
+RR1, RR2, RR3 = 2.0, 2.0, 2.0  # Yagona TP = 2.0R (1.0R da Avto-BE+)
 SWING_LEFT, SWING_RIGHT = 3, 3
 CHECK_INTERVAL_SEC = 5
 ZONE_MAX_DISTANCE_PCT = 0.08
@@ -940,7 +940,7 @@ async def update_account(balance=None, risk=None):
     await db.state_set("account", acc)
 
 def _is_win_result(r):
-    return r in ("TP1", "TP2", "TP3", "TP1 + Trailing SL", "TP2 + Trailing SL")
+    return r in ("TP (2.0R)", "TP1", "TP2", "TP3", "TP1 + Trailing SL", "TP2 + Trailing SL")
 
 async def win_rate_text():
     results = await db.get_all_results()
@@ -1274,8 +1274,7 @@ def render_smc_chart_png(candles, zones, struct_info, trade=None, width=820, hei
         levels = [
             ("ENTRY", trade["entry"], (240, 240, 255)),
             ("SL", trade["sl"], (255, 75, 85)),
-            ("TP1", trade["tp1"], (45, 210, 140)),
-            ("TP2", trade["tp2"], (30, 235, 180)),
+            ("TP 2R", trade["tp1"], (30, 235, 180)),
         ]
         for lbl, val, col in levels:
             if p_min <= val <= p_max:
@@ -2507,7 +2506,8 @@ async def close_trade(session, trade, result, price):
     r_mult = pnl_pts / max(abs(trade["entry"] - init_sl), 0.01)
 
     emoji = {
-        "TP2": "✅🏆", "TP3": "🚀👑", "TP1 + Trailing SL": "✅🛡", "TP2 + Trailing SL": "✅🏆",
+        "TP (2.0R)": "✅🏆", "TP1": "✅", "TP2": "✅🏆", "TP3": "🚀👑",
+        "TP1 + Trailing SL": "✅🛡", "TP2 + Trailing SL": "✅🏆",
         "BE+": "➖✅", "SL": "❌", "BE": "➖", "MANUAL": "🛑",
     }.get(result, "ℹ️")
     stat = await win_rate_text()
@@ -2535,9 +2535,10 @@ async def monitor_trade(session, price, bias15):
         side = trade["signal"]
         is_long = side == "LONG"
         entry = trade["entry"]
-        tp1, tp2, tp3 = trade["tp1"], trade["tp2"], trade.get("tp3")
+        tp = trade["tp1"]  # Yagona 2.0R TP
         init_sl = trade.get("initial_sl", trade["sl"])
         risk_pts = max(abs(entry - init_sl), 0.01)
+        be_trigger = round(entry + risk_pts, 2) if is_long else round(entry - risk_pts, 2)
         notes = []
         to_close = None
 
@@ -2557,51 +2558,43 @@ async def monitor_trade(session, price, bias15):
             except Exception:
                 trade["stale_warned"] = True
 
-        if reached(tp1) and not trade.get("tp1_notified"):
+        # 1) 1.0R ga yetganda SL ni Avto-Bezubitokka (BE+) ko'chirish
+        if reached(be_trigger) and not trade.get("tp1_notified"):
             trade["tp1_notified"] = True
             trade["breakeven"] = True
-            be_lock = max(abs(tp1 - entry) * 0.25, 0.30)
+            be_lock = max(risk_pts * 0.20, 0.30)
             new_sl = round(entry + be_lock, 2) if is_long else round(entry - be_lock, 2)
             if better_sl(new_sl, trade["sl"]):
                 trade["sl"] = new_sl
             notes.append(
-                f"🎯 <b>TP1 OLINDI ({tp1})!</b>\n"
-                f"🛡 SL foydali darajaga (BE+) ko'chirildi: <code>{trade['sl']}</code>"
+                f"🛡 <b>+1.0R ({be_trigger}) OLINDI!</b>\n"
+                f"🔒 SL Bezubitokka (BE+) ko'chirildi: <code>{trade['sl']}</code> | Maqsad TP (2.0R): <code>{tp}</code>"
             )
 
-        if reached(tp2) and not trade.get("tp2_notified"):
-            trade["tp2_notified"] = True
-            if better_sl(tp1, trade["sl"]):
-                trade["sl"] = round(tp1, 2)
-            notes.append(
-                f"🏆 <b>TP2 OLINDI ({tp2})!</b>\n"
-                f"🔒 SL TP1 ga ko'chirildi: <code>{trade['sl']}</code> | Maqsad TP3: <code>{tp3}</code>"
-            )
-
-        if trade.get("tp1_notified") and ((is_long and price > tp1) or (not is_long and price < tp1)):
-            trail_sl = round(price - risk_pts, 2) if is_long else round(price + risk_pts, 2)
-            if better_sl(trail_sl, trade["sl"]) and abs(trail_sl - trade["sl"]) > 0.35:
+        # 2) 1.3R dan oshganda Trailing SL
+        if trade.get("tp1_notified"):
+            trail_sl = round(price - risk_pts * 0.85, 2) if is_long else round(price + risk_pts * 0.85, 2)
+            if better_sl(trail_sl, trade["sl"]) and abs(trail_sl - trade["sl"]) > 0.40:
                 trade["sl"] = trail_sl
                 last_noted = trade.get("last_trail_note_sl")
                 if last_noted is None or abs(trail_sl - last_noted) >= 1.0:
                     trade["last_trail_note_sl"] = trail_sl
                     notes.append(f"🔥 <b>{side} Trailing SL:</b> <code>{trade['sl']}</code>")
 
+        # 3) Yagona TP (2.0R) yoki SL tekshiruvi
         sl_hit = (is_long and price <= trade["sl"]) or ((not is_long) and price >= trade["sl"])
-        tp3_hit = bool(tp3) and reached(tp3)
+        tp_hit = reached(tp)
 
-        if sl_hit:
+        if tp_hit:
+            to_close = ("TP (2.0R)", tp)
+        elif sl_hit:
             sl_price = trade["sl"]
             pnl_pts = (sl_price - entry) if is_long else (entry - sl_price)
-            if trade.get("tp2_notified"):
-                label = "TP2 + Trailing SL"
-            elif trade.get("tp1_notified"):
+            if trade.get("tp1_notified"):
                 label = "TP1 + Trailing SL" if pnl_pts >= 0.5 * risk_pts else "BE+"
             else:
                 label = "SL"
             to_close = (label, sl_price)
-        elif tp3_hit:
-            to_close = ("TP3", tp3)
 
         if not to_close:
             if bias15 is not None and bias15 != trade["bias"]:
@@ -2818,21 +2811,19 @@ async def analyze_gold_market(session, run_deep_scoring=True):
 def format_signal_message(trade, status, acc):
     side_emoji = "🟢 <b>LONG (BUY)</b>" if trade["signal"] == "LONG" else "🔴 <b>SHORT (SELL)</b>"
     sl_pts = abs(trade["entry"] - trade["sl"])
-    tp1_pts = abs(trade["tp1"] - trade["entry"])
-    tp2_pts = abs(trade["tp2"] - trade["entry"])
-    tp3_pts = abs(trade["tp3"] - trade["entry"])
+    tp_pts = abs(trade["tp1"] - trade["entry"])
+    tp_usd = round((trade["lot"] / XM_MIN_LOT) * tp_pts * XM_OZ_PER_MIN_LOT, 2)
 
     lines = [
         f"🎯 <b>GOLD SNIPER SIGNAL — v19 ULTIMATE</b>",
         f"━━━━━━━━━━━━━━━━━━━━",
         f"Yo'nalish: {side_emoji} | Daraja: <b>{trade.get('grade', 'A')} ({trade.get('score', 0)}/100)</b>",
-        f"Zona: <b>15m {html.escape(trade['zone_kind'])}</b> (<code>{trade['zone_bottom']} — {trade['zone_top']}</code>)",
+        f"Zona: <b>{html.escape(trade['zone_kind'])}</b> (<code>{trade['zone_bottom']} — {trade['zone_top']}</code>)",
         f"",
         f"📍 <b>Kirish (Entry):</b> <code>{trade['entry']}</code>",
         f"🛑 <b>Stop Loss:</b> <code>{trade['sl']}</code> (<i>-{sl_pts:.2f}$ / -{trade['risk_usd']:.2f}$</i>)",
-        f"✅ <b>TP1 ({RR1}R):</b> <code>{trade['tp1']}</code> (<i>+{tp1_pts:.2f}$</i>)",
-        f"🏆 <b>TP2 ({RR2}R):</b> <code>{trade['tp2']}</code> (<i>+{tp2_pts:.2f}$</i>)",
-        f"🚀 <b>TP3 ({RR3}R):</b> <code>{trade['tp3']}</code> (<i>+{tp3_pts:.2f}$</i>)",
+        f"🏆 <b>Take Profit (2.0R):</b> <code>{trade['tp1']}</code> (<i>+{tp_pts:.2f}$ / +${tp_usd:.2f}</i>)",
+        f"🛡 <b>Bezubitok (BE+):</b> <i>+1.0R da SL avtomatik foydaga ko'chadi</i>",
         f"",
         f"💼 <b>Lot (Balans ${acc['balance']:.0f}):</b> <code>{trade['lot']}</code> lot (Risk: {acc['risk_pct']:.1f}%)",
         f"🧭 <b>MTF:</b> 5m: <code>{status['b5']}</code> | 15m: <code>{status['b15']}</code> | 1H: <code>{status['b1h']}</code> | 4H: <code>{status['b4h']}</code>",
@@ -2933,15 +2924,15 @@ async def scanner_loop(app):
                     and cur_bar_ts != last_signal_bar_ts
                 ):
                     async with _monitor_lock:
+                        # Agar avvalgi bitim BE+ da bo'lsa, uni statistikaga yozib qo'yamiz
                         if trade and trade.get("tp1_notified"):
                             await db.insert_trade(
-                                trade, "TP1", price,
+                                trade, "BE+", price,
                                 trade.get("lot", XM_MIN_LOT),
                                 trade.get("risk_usd", 0.0),
                                 trade.get("confirmations", ""),
                             )
                             _metrics["closed"] += 1
-                            _metrics["wins"] += 1
                         await db.state_set("current_trade", cand)
                         last_signal_bar_ts = cur_bar_ts
                         _metrics["signals"] += 1
@@ -2954,7 +2945,7 @@ async def scanner_loop(app):
                         if png:
                             await send_telegram_photo(
                                 session, png,
-                                caption=f"🎯 <b>{cand['signal']} @ {cand['entry']}</b> | SL: {cand['sl']} | TP1: {cand['tp1']} | TP2: {cand['tp2']}",
+                                caption=f"🎯 <b>{cand['signal']} @ {cand['entry']}</b> | SL: {cand['sl']} | TP (2.0R): {cand['tp1']}",
                             )
 
                         # Exness & Binance avto-savdo
@@ -3526,9 +3517,6 @@ setInterval(loadState, 3000);
 """
 
 # ==================== WEB SERVER & CLOUD BRIDGE ENDPOINTS ====================
-async def handle_index(request):
-    return web.Response(text=MINI_APP_HTML, content_type="text/html")
-
 async def handle_health(request):
     return web.json_response({
         "ok": True,
