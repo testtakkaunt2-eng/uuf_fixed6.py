@@ -946,13 +946,51 @@ async def win_rate_text():
     results = await db.get_all_results()
     total = len(results)
     if not total:
-        return "Hali statistika yo'q"
+        return "Hali statistika yo'q (Kazino bloki #1: 0/20)"
     wins = sum(1 for r in results if _is_win_result(r))
     losses = sum(1 for r in results if r == "SL")
     be = total - wins - losses
     denom = wins + losses
     wr = (wins / denom * 100) if denom > 0 else 0.0
-    return f"WR: {wr:.1f}% ({wins}✅ / {losses}❌ / {be}🛡 | Jami: {total})"
+    block_num = (total - 1) // 20 + 1
+    in_block = ((total - 1) % 20) + 1
+    return (
+        f"WR: {wr:.1f}% ({wins}✅ / {losses}❌ / {be}🛡 | Jami: {total}) | "
+        f"🎲 Blok #{block_num}: {in_block}/20"
+    )
+
+async def check_psychology_guard():
+    """Trading in the Zone: Anti-Revenge (Tilt) va Anti-Euphoria nazorati."""
+    recent = await db.get_recent_trades(limit=5)
+    if not recent:
+        return {"score_add": 0, "risk_mult": 1.0, "note": None}
+    # Ketma-ket SL (Revenge trading himoyasi)
+    consec_sl = 0
+    for t in recent:
+        if t["result"] == "SL":
+            consec_sl += 1
+        else:
+            break
+    if consec_sl >= 2:
+        return {
+            "score_add": 6,
+            "risk_mult": 0.75,
+            "note": f"🛑 Anti-Tilt ({consec_sl}x SL): Faqat A/A+ signal va -25% risk",
+        }
+    # Ketma-ket Win (Eyforiya himoyasi)
+    consec_win = 0
+    for t in recent:
+        if _is_win_result(t["result"]):
+            consec_win += 1
+        else:
+            break
+    if consec_win >= 3:
+        return {
+            "score_add": 0,
+            "risk_mult": 1.0,
+            "note": f"🛡 Anti-Eyforiya ({consec_win}x Win): Standart risk qat'iy saqlandi",
+        }
+    return {"score_add": 0, "risk_mult": 1.0, "note": None}
 
 # ==================== GEMINI AI ENGINE ====================
 async def ask_gemini_ai(session, prompt_text, system_instruction=None):
@@ -1551,17 +1589,37 @@ def detect_equal_highs_lows(candles, cache_key="XAU_15m", tol_pct=0.06):
 
 def detect_asia_and_pd_sweeps(candles_15m, pdh, pdl):
     asia_high, asia_low = None, None
+    ff_high, ff_low = None, None
+    daily_open_ny = None
     now = datetime.datetime.now(datetime.timezone.utc)
     now_date = now.date()
     asia_done = now.hour >= ASIA_END_HOUR_UTC
-    asia_bars = []
+    asia_bars, ff_bars = [], []
     for c in candles_15m[-96:]:
         dt = datetime.datetime.fromtimestamp(c[0] / 1000.0, tz=datetime.timezone.utc)
-        if dt.date() == now_date and 0 <= dt.hour < ASIA_END_HOUR_UTC:
-            asia_bars.append(c)
+        if dt.date() == now_date:
+            if 0 <= dt.hour < ASIA_END_HOUR_UTC:
+                asia_bars.append(c)
+            if dt.hour == 6:  # Frankfurt Open (06:00 - 07:00 UTC)
+                ff_bars.append(c)
+            if dt.hour == 4 and dt.minute == 0 and daily_open_ny is None:
+                daily_open_ny = round(c[O], 2)  # NY Midnight Open (00:00 EST/EDT ~ 04:00/05:00 UTC)
     if len(asia_bars) >= 4:
         asia_high = round(max(c[H] for c in asia_bars), 2)
         asia_low = round(min(c[L] for c in asia_bars), 2)
+    if ff_bars:
+        ff_high = round(max(c[H] for c in ff_bars), 2)
+        ff_low = round(min(c[L] for c in ff_bars), 2)
+
+    # 90-Minute ICT Cycle (NY 00:00 dan boshlab har 90 daqiqalik faza)
+    mins_since_utc0 = now.hour * 60 + now.minute
+    cycle_pos = mins_since_utc0 % 90
+    if cycle_pos < 30:
+        cycle_90m = "Accumulation (0-30m)"
+    elif cycle_pos < 60:
+        cycle_90m = "Manipulation / Judas (30-60m)"
+    else:
+        cycle_90m = "Distribution / Real Move (60-90m)"
 
     recent = candles_15m[-4:]
     bull_sweeps, bear_sweeps = [], []
@@ -1575,10 +1633,18 @@ def detect_asia_and_pd_sweeps(candles_15m, pdh, pdl):
             bull_sweeps.append("Asia Low Sweep (Judas Swing)")
         if asia_done and asia_high and c[H] > asia_high and c[C] < asia_high:
             bear_sweeps.append("Asia High Sweep (Judas Swing)")
+        if now.hour >= 7 and ff_low and c[L] < ff_low and c[C] > ff_low:
+            bull_sweeps.append("Frankfurt Low (FFL) Trap Sweep")
+        if now.hour >= 7 and ff_high and c[H] > ff_high and c[C] < ff_high:
+            bear_sweeps.append("Frankfurt High (FFH) Trap Sweep")
 
     return {
         "asia_high": asia_high,
         "asia_low": asia_low,
+        "ff_high": ff_high,
+        "ff_low": ff_low,
+        "daily_open_ny": daily_open_ny,
+        "cycle_90m": cycle_90m,
         "bull_sweep": bull_sweeps[0] if bull_sweeps else None,
         "bear_sweep": bear_sweeps[0] if bear_sweeps else None,
     }
@@ -1602,35 +1668,90 @@ def detect_fvg(candles, min_size=0.0):
             })
     return fvgs
 
+def detect_fu_candles(candles):
+    """Bozorni zabt etish (4-dars): Likvidlikni olib strukturani buzuvchi FU Candle va uning 50% Wick zonasi."""
+    fu_zones = []
+    n = len(candles)
+    if n < 12:
+        return fu_zones
+    for i in range(5, n - 1):
+        cur = candles[i]
+        prev_high = max(c[H] for c in candles[i - 5:i])
+        prev_low = min(c[L] for c in candles[i - 5:i])
+        prev_struct_low = min(c[L] for c in candles[i - 3:i])
+        prev_struct_high = max(c[H] for c in candles[i - 3:i])
+        rng = max(cur[H] - cur[L], 0.01)
+        upper_wick = cur[H] - max(cur[O], cur[C])
+        lower_wick = min(cur[O], cur[C]) - cur[L]
+        # Bullish FU: pastdagi likvidlikni (stop-loss) olib, kuchli yuqoriga yopilgan sham
+        if cur[L] < prev_low and cur[C] > prev_low and lower_wick / rng >= 0.38 and cur[C] >= prev_struct_high:
+            wick_top = min(cur[O], cur[C])
+            wick_bot = cur[L]
+            wick_50 = (wick_top + wick_bot) / 2.0
+            fu_zones.append({
+                "type": "bullish", "kind": "FU",
+                "top": round(wick_top, 2), "bottom": round(wick_bot, 2),
+                "ce": round(wick_50, 2), "index": i, "algo_candle": True,
+            })
+        # Bearish FU: tepadagi likvidlikni olib, kuchli pastga yopilgan sham
+        elif cur[H] > prev_high and cur[C] < prev_high and upper_wick / rng >= 0.38 and cur[C] <= prev_struct_low:
+            wick_top = cur[H]
+            wick_bot = max(cur[O], cur[C])
+            wick_50 = (wick_top + wick_bot) / 2.0
+            fu_zones.append({
+                "type": "bearish", "kind": "FU",
+                "top": round(wick_top, 2), "bottom": round(wick_bot, 2),
+                "ce": round(wick_50, 2), "index": i, "algo_candle": True,
+            })
+    return fu_zones
+
 def detect_ob_and_breakers(candles):
+    """3-dars Body-Only Orderblock + ICT Algo Candle (FVG + Liquidity Grab) + Rejection Block (RB)."""
     bodies = [abs(c[C] - c[O]) for c in candles]
     vols = [c[V] if len(c) > 5 else 0 for c in candles]
     raw_obs = []
-    for i in range(10, len(candles) - 2):
+    n = len(candles)
+    for i in range(10, n - 2):
         ab = sum(bodies[i - 10:i]) / 10
         av = sum(vols[i - 10:i]) / 10
         if ab == 0 or av == 0:
             continue
         cur, fol = candles[i], candles[i + 1]
+        nxt = candles[i + 2]
         ib = bodies[i + 1] > ab * 1.35
         iv = vols[i + 1] > av * 1.4
         bob = cur[C] < cur[O] and fol[C] > fol[O] and fol[C] > cur[H]
         beob = cur[C] > cur[O] and fol[C] < fol[O] and fol[C] < cur[L]
+
+        # ICT Algo Candle: likvidlik olgan va ketidan FVG qoldirgan OB
+        grabbed_low = cur[L] <= min(c[L] for c in candles[max(0, i - 5):i])
+        grabbed_high = cur[H] >= max(c[H] for c in candles[max(0, i - 5):i])
+        has_bull_fvg = nxt[L] > cur[H]
+        has_bear_fvg = nxt[H] < cur[L]
+
+        # Body-Only qoidasi: faqat sham tanasi (Open - Close) olinadi
+        body_top = max(cur[O], cur[C])
+        body_bot = min(cur[O], cur[C])
+        if body_top - body_bot < 0.15:
+            body_top = cur[H] if beob else body_top
+            body_bot = cur[L] if bob else body_bot
+
         if ib and iv and bob:
             raw_obs.append({
-                "type": "bullish", "kind": "OB",
-                "top": max(cur[O], cur[C]), "bottom": cur[L],
-                "ce": (max(cur[O], cur[C]) + cur[L]) / 2.0, "index": i,
+                "type": "bullish", "kind": "AC_OB" if (grabbed_low and has_bull_fvg) else "OB",
+                "top": body_top, "bottom": body_bot,
+                "ce": (body_top + body_bot) / 2.0, "index": i,
+                "algo_candle": bool(grabbed_low and has_bull_fvg),
             })
         if ib and iv and beob:
             raw_obs.append({
-                "type": "bearish", "kind": "OB",
-                "top": cur[H], "bottom": min(cur[O], cur[C]),
-                "ce": (cur[H] + min(cur[O], cur[C])) / 2.0, "index": i,
+                "type": "bearish", "kind": "AC_OB" if (grabbed_high and has_bear_fvg) else "OB",
+                "top": body_top, "bottom": body_bot,
+                "ce": (body_top + body_bot) / 2.0, "index": i,
+                "algo_candle": bool(grabbed_high and has_bear_fvg),
             })
 
     zones = []
-    n = len(candles)
     for ob in raw_obs:
         fi = ob["index"]
         if n - 1 - fi > 60:
@@ -1647,6 +1768,16 @@ def detect_ob_and_breakers(candles):
                 break
 
         if broken_idx is None:
+            # Inducement (IDM) tekshiruvi: OB dan keyin va joriy shamdan oldin kichik pullback bo'lganmi
+            has_idm = False
+            for m_idx in range(fi + 2, n - 1):
+                if ob["type"] == "bullish" and candles[m_idx][L] < candles[m_idx - 1][L]:
+                    has_idm = True
+                    break
+                if ob["type"] == "bearish" and candles[m_idx][H] > candles[m_idx - 1][H]:
+                    has_idm = True
+                    break
+            ob["has_idm"] = has_idm
             zones.append(ob)
         else:
             bb_type = "bearish" if ob["type"] == "bullish" else "bullish"
@@ -1664,6 +1795,8 @@ def detect_ob_and_breakers(candles):
                     "type": bb_type, "kind": "BB",
                     "top": ob["top"], "bottom": ob["bottom"],
                     "ce": ob["ce"], "index": broken_idx,
+                    "algo_candle": ob.get("algo_candle", False),
+                    "has_idm": True,
                 })
     return zones
 
@@ -1699,7 +1832,8 @@ def get_active_zones(candles, cache_key="XAU_15m"):
     untested = FVG_REQUIRE_UNTESTED and cache_key == "XAU_15m"
     fvgs = [z for z in detect_fvg(candles, min_size) if _fvg_is_fresh(z, candles, untested=untested)]
     obs_bbs = detect_ob_and_breakers(candles)
-    all_fresh = fvgs + obs_bbs
+    fus = [z for z in detect_fu_candles(candles) if _fvg_is_fresh(z, candles, max_age_bars=30)]
+    all_fresh = fvgs + obs_bbs + fus
     _zones_cache[full_key] = {"ts": ts, "zones": all_fresh}
     return all_fresh
 
@@ -2243,6 +2377,8 @@ def build_sniper_trade(cl15, cl5, struct15, price, atr15, balance):
         "tp2": round(entry + direction * risk * RR2, 2),
         "tp3": round(entry + direction * risk * RR3, 2),
         "confluence": confluence,
+        "algo_candle": zone.get("algo_candle", False),
+        "has_idm": zone.get("has_idm", False),
         "sniper_mode": is_small_acc,
         "opened_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
         "breakeven": False, "tp1_notified": False, "tp2_notified": False, "stale_warned": False,
@@ -2558,8 +2694,12 @@ async def monitor_trade(session, price, bias15):
             except Exception:
                 trade["stale_warned"] = True
 
-        # 1) 1.0R ga yetganda SL ni Avto-Bezubitokka (BE+) ko'chirish
-        if reached(be_trigger) and not trade.get("tp1_notified"):
+        # 1) +1.0R ga yetganda YOKI +0.6R foydada 5m BOS bo'lganda SL ni Avto-Bezubitokka (BE+) ko'chirish
+        bos_be_ready = (
+            reached(round(entry + risk_pts * 0.60, 2) if is_long else round(entry - risk_pts * 0.60, 2))
+            and bias15 == trade["bias"]
+        )
+        if (reached(be_trigger) or bos_be_ready) and not trade.get("tp1_notified"):
             trade["tp1_notified"] = True
             trade["breakeven"] = True
             be_lock = max(risk_pts * 0.20, 0.30)
@@ -2567,7 +2707,7 @@ async def monitor_trade(session, price, bias15):
             if better_sl(new_sl, trade["sl"]):
                 trade["sl"] = new_sl
             notes.append(
-                f"🛡 <b>+1.0R ({be_trigger}) OLINDI!</b>\n"
+                f"🛡 <b>BE+ FAOL ({price})!</b>\n"
                 f"🔒 SL Bezubitokka (BE+) ko'chirildi: <code>{trade['sl']}</code> | Maqsad TP (2.0R): <code>{tp}</code>"
             )
 
@@ -2768,12 +2908,37 @@ async def analyze_gold_market(session, run_deep_scoring=True):
                     score += adj
                     confirmations.extend(mem_notes)
 
+                # FU Candle, Algo Candle va IDM uchun qo'shimcha ball
+                if candidate.get("zone_kind") in ("FU", "AC_OB") or candidate.get("algo_candle"):
+                    score += 8
+                    confirmations.append(f"ICT {candidate['zone_kind']} (Algo/Wick 50% +8)")
+                if candidate.get("has_idm"):
+                    score += 6
+                    confirmations.append("IDM (Inducement Swept +6)")
+
+                # NY Midnight Open (Judas Swing) filtri
+                d_open = sweeps.get("daily_open_ny")
+                if d_open:
+                    if b15 == "bullish" and price < d_open:
+                        score += 5
+                        confirmations.append(f"Below NY 00:00 Open ({d_open} +5)")
+                    elif b15 == "bearish" and price > d_open:
+                        score += 5
+                        confirmations.append(f"Above NY 00:00 Open ({d_open} +5)")
+
+                # Trading in the Zone: Anti-Tilt & Anti-Euphoria
+                psych = await check_psychology_guard()
+                if psych["note"]:
+                    confirmations.append(psych["note"])
+                effective_risk = round(acc["risk_pct"] * psych["risk_mult"], 2)
+
                 score = max(0, min(100, score))
                 grade = "A+" if score >= 80 else ("A" if score >= 68 else "B+")
 
                 lot, usd_risk = calc_xm_lot_and_risk(
-                    candidate["entry"], candidate["sl"], acc["balance"], acc["risk_pct"]
+                    candidate["entry"], candidate["sl"], acc["balance"], effective_risk
                 )
+                candidate["min_req_score"] = MIN_SIGNAL_SCORE + psych["score_add"]
                 candidate["score"] = score
                 candidate["grade"] = grade
                 candidate["lot"] = lot
@@ -2918,7 +3083,7 @@ async def scanner_loop(app):
                 cur_bar_ts = cl15[-1][0] if cl15 else 0
                 if (
                     cand
-                    and cand.get("score", 0) >= MIN_SIGNAL_SCORE
+                    and cand.get("score", 0) >= cand.get("min_req_score", MIN_SIGNAL_SCORE)
                     and status["in_killzone"]
                     and not status["news_blocked"]
                     and cur_bar_ts != last_signal_bar_ts
