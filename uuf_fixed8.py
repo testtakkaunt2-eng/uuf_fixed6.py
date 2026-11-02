@@ -1,10 +1,10 @@
 """
-GOLD (EXNESS / XM / XAUUSD) SMC + ICT Bot — v19 ULTIMATE (10/10 EDITION)
+GOLD (EXNESS / XM / XAUUSD) SMC + ICT Bot — v19 (qisqa xabarlar, BUY/SELL, avto-balans)
 ========================================================================
 v16 TITANIUM FIXED va v18 TITANIUM ning to'liq birlashtirilgan, dublikatlardan
 tozalangan yakuniy versiyasi:
   ✅ 1 ta foydalanuvchi uchun 3 tagacha Exness (Demo/Real) MT5 hisob ulash + Avto-server topish
-  ✅ Native MetaTrader5 + Bepul Cloud Bridge (/api/mt5_bridge/poll) orqali LONG/SHORT avto-savdo
+  ✅ Native MetaTrader5 + Bepul Cloud Bridge (/api/mt5_bridge/poll) orqali BUY/SELL avto-savdo
   ✅ TP1/TP2/Trailing va /sync bo'lganda Exness ochiq bitimlarining SL darajasini avto-yangilash
   ✅ Chatga yuborilgan Exness ID/Parol xabarini darhol o'chirish (deleteMessage himoyasi)
   ✅ BOT_TOKEN dan avtomatik Fernet shifrlash kaliti yaratish (ENCRYPTION_KEY shart emas)
@@ -115,6 +115,8 @@ FVG_REQUIRE_UNTESTED = False
 NEWS_RETRY_SEC = 300
 
 DEFAULT_BALANCE_USD = 20.0
+MIN_AUTO_BALANCE_USD = 1.0       # Avto-yangilanganda balans shundan pastga tushmaydi
+SEND_AI_EXTRA_MESSAGES = False   # True qilsangiz: signaldan keyin AI sharh va SL dan keyin AI tahlil yuboriladi
 DEFAULT_RISK_PER_TRADE_PCT = 10.0
 MAX_RISK_PER_TRADE_PCT = 25.0
 SNIPER_MIN_SL_POINTS = 1.10
@@ -855,12 +857,12 @@ async def execute_exness_autotrades(session, trade):
                 await db.update_exness_status(
                     acc["chat_id"], acc["slot"],
                     balance=res.get("balance"),
-                    status_text=f"Ochiq #{res.get('ticket')} ({trade['signal']})",
+                    status_text=f"Ochiq #{res.get('ticket')} ({side_txt(trade['signal'])})",
                 )
                 await send_telegram(
                     session,
-                    f"✅ <b>Exness #{acc['slot']} ({html.escape(acc['login'])}) — Avto-Order ochildi!</b>\n"
-                    f"Yo'nalish: <b>{trade['signal']}</b> | Lot: <code>{lot}</code> | Narx: <code>{res.get('price')}</code>\n"
+                    f"✅ <b>Exness #{acc['slot']}: {side_txt(trade['signal'])} ochildi</b>\n"
+                    f"Lot: <code>{lot}</code> | Narx: <code>{res.get('price')}</code> | "
                     f"SL: <code>{res.get('sl')}</code> | TP: <code>{res.get('tp')}</code>",
                     chat_id=acc["chat_id"],
                 )
@@ -868,14 +870,13 @@ async def execute_exness_autotrades(session, trade):
                 await db.update_exness_status(acc["chat_id"], acc["slot"], status_text=res.get("msg", "Xato"))
                 await send_telegram(
                     session,
-                    f"⚠️ <b>Exness #{acc['slot']} ({html.escape(acc['login'])}) order xatosi:</b> "
-                    f"{html.escape(str(res.get('msg')))}",
+                    f"⚠️ <b>Exness #{acc['slot']} xato:</b> {html.escape(str(res.get('msg')))}",
                     chat_id=acc["chat_id"],
                 )
         else:
             await db.update_exness_status(
                 acc["chat_id"], acc["slot"],
-                status_text=f"Bridge Signal: {trade['signal']} @ {trade['entry']}",
+                status_text=f"Signal: {side_txt(trade['signal'])} @ {trade['entry']}",
             )
 
 async def sync_exness_positions_action(action="close", new_sl=None):
@@ -909,6 +910,47 @@ def clear_analysis_caches():
     _zones_cache.clear()
     _swings_cache.clear()
 
+
+# ==================== TUSHUNARLI MATN YORDAMCHILARI ====================
+def side_txt(signal):
+    """Ichkarida LONG/SHORT qoladi, foydalanuvchiga BUY/SELL ko'rsatiladi."""
+    return "BUY" if str(signal).upper() == "LONG" else "SELL"
+
+def side_icon(signal):
+    return "🟢" if str(signal).upper() == "LONG" else "🔴"
+
+def trend_txt(bias):
+    if bias == "bullish":
+        return "yuqoriga ↑"
+    if bias == "bearish":
+        return "pastga ↓"
+    return "yo'q"
+
+_RESULT_TXT = {
+    "TP (2.0R)": "TP ✅ (foyda)",
+    "TP1": "TP ✅ (foyda)",
+    "TP2": "TP ✅ (foyda)",
+    "TP3": "TP ✅ (foyda)",
+    "TP1 + Trailing SL": "Foyda bilan yopildi ✅",
+    "TP2 + Trailing SL": "Foyda bilan yopildi ✅",
+    "BE+": "Zararsiz yopildi ➖",
+    "BE": "Zararsiz yopildi ➖",
+    "SL": "SL ❌ (zarar)",
+    "MANUAL": "Qo'lda yopildi 🛑",
+    "REVERSAL_FLIP": "Teskari signal 🔄",
+}
+
+def result_txt(result):
+    return _RESULT_TXT.get(result, str(result))
+
+def calc_trade_pnl(trade, price, lot):
+    """Bitimning yopilish narxidagi foyda/zarari (USD) va R."""
+    init_sl = trade.get("initial_sl", trade["sl"])
+    pnl_pts = (price - trade["entry"]) if trade["signal"] == "LONG" else (trade["entry"] - price)
+    pnl_usd = round((lot / XM_MIN_LOT) * pnl_pts * XM_OZ_PER_MIN_LOT, 2)
+    r_mult = pnl_pts / max(abs(trade["entry"] - init_sl), 0.01)
+    return pnl_usd, r_mult
+
 # ==================== SUBSCRIBERS / ACCOUNT ====================
 async def get_subs():
     return set(await db.state_get("subscribers", [ADMIN_CHAT_ID]))
@@ -941,6 +983,13 @@ async def update_account(balance=None, risk=None):
     if risk is not None:
         acc["risk_pct"] = risk
     await db.state_set("account", acc)
+
+async def apply_pnl_to_balance(pnl_usd):
+    """Bitim yopilganda foyda/zararni balansga qo'shadi. Yangi balansni qaytaradi."""
+    acc = await get_account()
+    new_bal = round(max(MIN_AUTO_BALANCE_USD, float(acc["balance"]) + float(pnl_usd)), 2)
+    await update_account(balance=new_bal)
+    return new_bal
 
 def _is_win_result(r):
     return r in ("TP (2.0R)", "TP1", "TP2", "TP3", "TP1 + Trailing SL", "TP2 + Trailing SL")
@@ -1046,11 +1095,12 @@ async def generate_ai_signal_review(session, trade, status, confirmations):
     sys_prompt = (
         "Sen professional SMC va ICT oltin (XAUUSD) treyderisan. "
         "Foydalanuvchi Exness/XM brokerda kichik balans (0.01 lot) bilan savdo qiladi. "
-        "Berilgan signalga 2-3 jumlada juda qisqa, aniq o'zbek tilida xulosa ber: "
-        "kirish qanchalik xavfsiz, likvidlik tuzog'i (inducement) yo'qmi va TP1 da nima qilish kerak."
+        "Berilgan signalga 1-2 jumlada juda qisqa, oddiy o'zbek tilida xulosa ber. "
+        "Murakkab terminlarsiz: kirish xavfsizmi yoki yo'qmi, va nimaga e'tibor berish kerak. "
+        "LONG o'rniga BUY, SHORT o'rniga SELL deb yoz."
     )
     user_prompt = (
-        f"Signal: {trade['signal']} | Grade: {trade.get('grade')} ({trade.get('score')}/100)\n"
+        f"Signal: {side_txt(trade['signal'])} | Grade: {trade.get('grade')} ({trade.get('score')}/100)\n"
         f"Entry: {trade['entry']} | SL: {trade['sl']} (Risk: {abs(trade['entry']-trade['sl']):.2f}$) | "
         f"TP1: {trade['tp1']} | TP2: {trade['tp2']}\n"
         f"MTF: 5m={status.get('b5')}, 15m={status.get('b15')}, 1H={status.get('b1h')}, 4H={status.get('b4h')}\n"
@@ -1065,7 +1115,7 @@ async def _send_ai_followup(session, trade, status, confirmations):
         if txt:
             await send_telegram(
                 session,
-                f"🧠 <b>Gemini AI Xulosasi ({trade['signal']} @ {trade['entry']}):</b>\n<i>{html.escape(txt)}</i>",
+                f"🧠 <b>AI ({side_txt(trade['signal'])} @ {trade['entry']}):</b> <i>{html.escape(txt)}</i>",
             )
     except asyncio.CancelledError:
         raise
@@ -1079,12 +1129,12 @@ async def _ai_post_mortem(session, trade, sl_price):
             return
         now_p = live_price() or _LAST_CANDLES_15M[-1][C]
         sys_prompt = (
-            "Sen institutsional SMC/ICT mentorisan. Oltin (XAUUSD) bitimi Stop Loss bo'ldi. "
-            "15 daqiqadan keyingi narxga qarab, SL sababini 2-3 jumlada aniq tushuntir: "
-            "bu Inducement/Liquidity Sweep bo'ldimi yoki haqiqiy Trend o'zgarishimi?"
+            "Sen SMC/ICT mentorisan. Oltin (XAUUSD) bitimi Stop Loss bo'ldi. "
+            "15 daqiqadan keyingi narxga qarab, SL sababini 1-2 jumlada oddiy o'zbek tilida tushuntir. "
+            "LONG o'rniga BUY, SHORT o'rniga SELL deb yoz."
         )
         prompt = (
-            f"Bitim: {trade['signal']} | Entry: {trade['entry']} | SL urildi: {sl_price}\n"
+            f"Bitim: {side_txt(trade['signal'])} | Entry: {trade['entry']} | SL urildi: {sl_price}\n"
             f"TP1: {trade['tp1']} | Zona: 15m {trade.get('zone_kind')} ({trade.get('zone_bottom')}-{trade.get('zone_top')})\n"
             f"Tasdiqlar: {trade.get('confirmations', '-')}\n"
             f"SL dan 15 daqiqa keyingi joriy narx: {now_p} (15m bias: {_LAST_STRUCT_15M.get('bias')})"
@@ -1093,9 +1143,7 @@ async def _ai_post_mortem(session, trade, sl_price):
         if txt:
             await send_telegram(
                 session,
-                f"🧬 <b>AI Post-Mortem (SL Ekspertizasi — {trade['signal']}):</b>\n"
-                f"SL narx: <code>{sl_price}</code> ➡️ 15m keyin: <code>{now_p}</code>\n\n"
-                f"<i>{html.escape(txt)}</i>",
+                f"🧬 <b>SL sababi ({side_txt(trade['signal'])}):</b> <i>{html.escape(txt)}</i>",
             )
     except asyncio.CancelledError:
         raise
@@ -2542,7 +2590,7 @@ async def _binance_autotrade_one(session, acc, trade):
         tp_px = round(filled_px * (1 + sl_dist_pct * RR1), 6)
         await send_telegram(
             session,
-            f"🤖 <b>Binance Auto-Trade</b> — LONG {html.escape(BINANCE_SYMBOL)}\n"
+            f"🤖 <b>Binance: BUY {html.escape(BINANCE_SYMBOL)}</b>\n"
             f"Hajm: <code>{amount}</code> @ ~<code>{filled_px}</code> | SL: <code>{sl_px}</code> | TP1: <code>{tp_px}</code>",
             chat_id=chat_id,
         )
@@ -2741,24 +2789,17 @@ async def close_trade(session, trade, result, price):
     elif result == "SL":
         _metrics["losses"] += 1
 
-    pnl_pts = (price - trade["entry"]) if trade["signal"] == "LONG" else (trade["entry"] - price)
-    pnl_usd = round((lot / XM_MIN_LOT) * pnl_pts * XM_OZ_PER_MIN_LOT, 2)
-    r_mult = pnl_pts / max(abs(trade["entry"] - init_sl), 0.01)
+    pnl_usd, r_mult = calc_trade_pnl(trade, price, lot)
+    new_balance = await apply_pnl_to_balance(pnl_usd)
 
-    emoji = {
-        "TP (2.0R)": "✅🏆", "TP1": "✅", "TP2": "✅🏆", "TP3": "🚀👑",
-        "TP1 + Trailing SL": "✅🛡", "TP2 + Trailing SL": "✅🏆",
-        "BE+": "➖✅", "SL": "❌", "BE": "➖", "MANUAL": "🛑",
-    }.get(result, "ℹ️")
-    stat = await win_rate_text()
+    sign_icon = "✅" if pnl_usd > 0 else ("❌" if pnl_usd < 0 else "➖")
     await send_telegram(
         session,
-        f"<b>GOLD {trade['signal']} YOPILDI</b> {emoji}\n"
-        f"Natija: <b>{html.escape(result)}</b> | Narx: <code>{price}</code>\n"
-        f"💰 <b>Natija ({lot} lot):</b> <code>{pnl_usd:+.2f}$</code> ({r_mult:+.2f}R)\n"
-        f"📊 {html.escape(stat)}",
+        f"{sign_icon} <b>{side_txt(trade['signal'])} yopildi</b> — {html.escape(result_txt(result))}\n"
+        f"Narx: <code>{price}</code> | Natija: <b>{pnl_usd:+.2f}$</b> ({r_mult:+.2f}R)\n"
+        f"💰 Balans: <b>${new_balance:.2f}</b>",
     )
-    if result == "SL" and GEMINI_API_KEY:
+    if result == "SL" and GEMINI_API_KEY and SEND_AI_EXTRA_MESSAGES:
         _spawn(_ai_post_mortem(session, dict(trade), price))
 
 async def monitor_trade(session, price, bias15):
@@ -2794,7 +2835,7 @@ async def monitor_trade(session, price, bias15):
                 age_h = (datetime.datetime.now(datetime.timezone.utc) - opened).total_seconds() / 3600.0
                 if age_h >= TRADE_STALE_WARNING_HOURS:
                     trade["stale_warned"] = True
-                    notes.append(f"⏳ <b>{side}</b> bitim {age_h:.1f} soatdan beri ochiq.")
+                    notes.append(f"⏳ {side_txt(side)} bitim {age_h:.0f} soatdan beri ochiq.")
             except Exception:
                 trade["stale_warned"] = True
 
@@ -2811,10 +2852,7 @@ async def monitor_trade(session, price, bias15):
             new_sl = round(entry + be_lock, 2) if is_long else round(entry - be_lock, 2)
             if better_sl(new_sl, trade["sl"]):
                 trade["sl"] = new_sl
-            notes.append(
-                f"🛡 <b>BE+ FAOL ({price})!</b>\n"
-                f"🔒 SL Bezubitokka (BE+) ko'chirildi: <code>{trade['sl']}</code> | Maqsad TP (2.0R): <code>{tp}</code>"
-            )
+            notes.append(f"🛡 {side_txt(side)}: SL foydaga surildi → <code>{trade['sl']}</code> (endi zarar bo'lmaydi)")
 
         # 2) 1.3R dan oshganda Trailing SL
         if trade.get("tp1_notified"):
@@ -2824,7 +2862,7 @@ async def monitor_trade(session, price, bias15):
                 last_noted = trade.get("last_trail_note_sl")
                 if last_noted is None or abs(trail_sl - last_noted) >= 1.0:
                     trade["last_trail_note_sl"] = trail_sl
-                    notes.append(f"🔥 <b>{side} Trailing SL:</b> <code>{trade['sl']}</code>")
+                    notes.append(f"🔥 {side_txt(side)}: SL surildi → <code>{trade['sl']}</code>")
 
         # 3) Yagona TP (2.0R) yoki SL tekshiruvi
         sl_hit = (is_long and price <= trade["sl"]) or ((not is_long) and price >= trade["sl"])
@@ -2850,7 +2888,7 @@ async def monitor_trade(session, price, bias15):
                         and now_m - _flip_last_warn >= FLIP_WARN_REPEAT_SEC):
                     _flip_last_warn = now_m
                     notes.append(
-                        f"⚠️ <b>Diqqat:</b> {side} ochiq, lekin 15m struktura <b>{bias15.upper()}</b> ga o'zgardi!"
+                        f"⚠️ {side_txt(side)} ochiq, lekin 15m trend {trend_txt(bias15)} o'zgardi."
                     )
             else:
                 _flip_since = None
@@ -3160,74 +3198,42 @@ async def analyze_gold_market(session, run_deep_scoring=True):
 
 # ==================== MESSAGE FORMATTERS ====================
 def format_signal_message(trade, status, acc):
-    side_emoji = "🟢 <b>LONG (BUY)</b>" if trade["signal"] == "LONG" else "🔴 <b>SHORT (SELL)</b>"
     sl_pts = abs(trade["entry"] - trade["sl"])
     tp_pts = abs(trade["tp1"] - trade["entry"])
     tp_usd = round((trade["lot"] / XM_MIN_LOT) * tp_pts * XM_OZ_PER_MIN_LOT, 2)
-
-    daily_num = trade.get("daily_count", 1)
-    setup_mdl = trade.get("setup_model", "SMC Intraday Sniper")
     lines = [
-        f"🎯 <b>GOLD SNIPER SIGNAL — v20 TOP-TRADER (#{daily_num}/{DAILY_TARGET_SIGNALS_MAX})</b>",
-        f"━━━━━━━━━━━━━━━━━━━━",
-        f"Yo'nalish: {side_emoji} | Daraja: <b>{trade.get('grade', 'A')} ({trade.get('score', 0)}/100)</b>",
-        f"Model: <b>{html.escape(setup_mdl)}</b>",
-        f"Zona: <b>{html.escape(trade['zone_kind'])}</b> (<code>{trade['zone_bottom']} — {trade['zone_top']}</code>)",
-        f"",
-        f"📍 <b>Kirish (Entry):</b> <code>{trade['entry']}</code>",
-        f"🛑 <b>Stop Loss:</b> <code>{trade['sl']}</code> (<i>-{sl_pts:.2f}$ / -{trade['risk_usd']:.2f}$</i>)",
-        f"🏆 <b>Take Profit (2.0R):</b> <code>{trade['tp1']}</code> (<i>+{tp_pts:.2f}$ / +${tp_usd:.2f}</i>)",
-        f"🛡 <b>Bezubitok (BE+):</b> <i>+1.0R da SL avtomatik foydaga ko'chadi</i>",
-        f"",
-        f"💼 <b>Lot (Balans ${acc['balance']:.0f}):</b> <code>{trade['lot']}</code> lot (Risk: {acc['risk_pct']:.1f}%)",
-        f"🧭 <b>MTF:</b> 5m: <code>{status['b5']}</code> | 15m: <code>{status['b15']}</code> | 1H: <code>{status['b1h']}</code> | 4H: <code>{status['b4h']}</code>",
-        f"⚖️ <b>EQ (50%):</b> <code>{status['eq15']}</code> | <b>PDH/PDL:</b> <code>{status['pdh']}</code> / <code>{status['pdl']}</code>",
-        f"",
-        f"🔥 <b>Tasdiqlar:</b> <i>{html.escape(trade.get('confirmations', '-'))}</i>",
+        f"{side_icon(trade['signal'])} <b>GOLD {side_txt(trade['signal'])}</b> (#{trade.get('daily_count', 1)})",
+        f"Kirish: <code>{trade['entry']}</code>",
+        f"SL: <code>{trade['sl']}</code> (-{trade['risk_usd']:.2f}$)",
+        f"TP: <code>{trade['tp1']}</code> (+{tp_usd:.2f}$)",
+        f"Lot: <code>{trade['lot']}</code> | Balans: ${acc['balance']:.2f}",
     ]
     return "\n".join(lines)
 
 async def format_status_message(status):
     acc = await get_account()
     trade = await db.state_get("current_trade")
-    ex_accs = await db.get_exness_accounts(ADMIN_CHAT_ID)
-    ws_badge = "🟢 Live WS" if _WS_CONNECTED else "🟡 REST"
-    kz_badge = "🔥 Faol" if status["in_killzone"] else "💤 Tinch"
-    news_txt = f"⛔ {html.escape(status['news_title'])}" if status["news_blocked"] else "✅ Tinch"
+    kz_txt = "faol" if status["in_killzone"] else "tinch"
+    news_txt = f"⛔ {html.escape(status['news_title'])}" if status["news_blocked"] else "yo'q"
 
     lines = [
-        f"📊 <b>XAUUSD (EXNESS/XM) BOZOR HOLATI</b> ({ws_badge})",
-        f"━━━━━━━━━━━━━━━━━━━━",
-        f"💰 <b>Joriy narx:</b> <code>{status['price']}</code> (Offset: <code>{status['offset']:+.2f}</code>)",
-        f"🕒 <b>Sessiya:</b> <code>{status['session'].upper()}</code> ({kz_badge}) | <b>Yangilik:</b> {news_txt}",
-        f"",
-        f"📐 <b>Struktura (MTF):</b>",
-        f" • 5m: <b>{status['b5'] or '-'}</b> | 15m: <b>{status['b15'] or '-'}</b> ({status['event15'] or '-'})",
-        f" • 1H: <b>{status['b1h'] or '-'}</b> | 4H: <b>{status['b4h'] or '-'}</b> | 1D: <b>{status['b1d'] or '-'}</b>",
-        f"",
-        f"🎯 <b>ICT Darajalar:</b>",
-        f" • Dealing Range: <code>{status['dealing_low']}</code> — <code>{status['dealing_high']}</code>",
-        f" • Equilibrium (50%): <code>{status['eq15']}</code> | VWAP: <code>{status['vwap15']}</code>",
-        f" • OTE (61.8-78.6%): <code>{status['ote_bottom']}</code> — <code>{status['ote_top']}</code>",
-        f" • Kecha (NY PDH / PDL): <code>{status['pdh']}</code> / <code>{status['pdl']}</code>",
-        f" • Asia High / Low: <code>{status['asia_high']}</code> / <code>{status['asia_low']}</code>",
-        f" • Likvidlik (BSL / SSL): EQH: <code>{status['eqh'] or '-'}</code> | EQL: <code>{status['eql'] or '-'}</code>",
+        f"📊 <b>GOLD: {status['price']}</b>",
+        f"Trend: 5m {trend_txt(status['b5'])} | 15m {trend_txt(status['b15'])} | 1H {trend_txt(status['b1h'])} | 4H {trend_txt(status['b4h'])}",
+        f"Sessiya: {status['session'].upper()} ({kz_txt}) | Yangilik: {news_txt}",
+        f"💰 Balans: <b>${acc['balance']:.2f}</b>",
     ]
 
     if trade:
-        pnl_pts = (status["price"] - trade["entry"]) if trade["signal"] == "LONG" else (trade["entry"] - status["price"])
         lot = trade.get("lot", XM_MIN_LOT)
-        pnl_usd = round((lot / XM_MIN_LOT) * pnl_pts * XM_OZ_PER_MIN_LOT, 2)
+        pnl_usd, _ = calc_trade_pnl(trade, status["price"], lot)
         lines.extend([
-            f"",
-            f"⚡ <b>OCHIQ BITIM ({trade['signal']}):</b>",
-            f" • Entry: <code>{trade['entry']}</code> | Joriy PnL: <b>{pnl_pts:+.2f}$ ({pnl_usd:+.2f}$)</b>",
-            f" • SL: <code>{trade['sl']}</code> | TP1: <code>{trade['tp1']}</code> | TP2: <code>{trade['tp2']}</code>",
+            "",
+            f"{side_icon(trade['signal'])} <b>Ochiq: {side_txt(trade['signal'])}</b> @ <code>{trade['entry']}</code>",
+            f"SL: <code>{trade['sl']}</code> | TP: <code>{trade['tp1']}</code>",
+            f"Hozir: <b>{pnl_usd:+.2f}$</b>",
         ])
     else:
-        lines.append("\n📭 <b>Ochiq bitim:</b> Yo'q (Sniper zona kutilmoqda)")
-
-    lines.append(f"\n🏦 <b>Exness hisoblar:</b> {len(ex_accs)}/{MAX_EXNESS_ACCOUNTS} ulangan | Balans: <code>${acc['balance']:.2f}</code>")
+        lines.append("📭 Ochiq bitim yo'q")
     return "\n".join(lines)
 
 # ==================== MAIN SCANNER LOOP ====================
@@ -3252,9 +3258,7 @@ async def scanner_loop(app):
                 last_impulse_ts = imp["ts"]
                 await send_telegram(
                     session,
-                    f"⚡ <b>IMPULS HARAKAT ANIQLANDI!</b>\n"
-                    f"Yo'nalish: <b>{imp['direction']}</b> | Sham hajmi: <code>{imp['range']}$</code> (o'rtachadan {imp['ratio']}x katta)\n"
-                    f"Joriy narx: <code>{imp['price']}</code>",
+                    f"⚡ Keskin harakat {imp['direction']} | {imp['range']}$ | narx: <code>{imp['price']}</code>",
                 )
 
             # 2) Ochiq bitimni tekshirish
@@ -3291,14 +3295,25 @@ async def scanner_loop(app):
                     async with _monitor_lock:
                         if trade:
                             close_lbl = "BE+" if trade.get("tp1_notified") else "REVERSAL_FLIP"
+                            old_lot = trade.get("lot", XM_MIN_LOT)
                             await db.insert_trade(
                                 trade, close_lbl, price,
-                                trade.get("lot", XM_MIN_LOT),
+                                old_lot,
                                 trade.get("risk_usd", 0.0),
                                 trade.get("confirmations", ""),
                             )
                             _metrics["closed"] += 1
                             _spawn(sync_exness_positions_action(action="close"))
+                            # Balansni avto-yangilash + qisqa xabar
+                            flip_pnl, flip_r = calc_trade_pnl(trade, price, old_lot)
+                            flip_bal = await apply_pnl_to_balance(flip_pnl)
+                            await send_telegram(
+                                session,
+                                f"{'✅' if flip_pnl > 0 else ('❌' if flip_pnl < 0 else '➖')} "
+                                f"<b>{side_txt(trade['signal'])} yopildi</b> — {html.escape(result_txt(close_lbl))}\n"
+                                f"Narx: <code>{price}</code> | Natija: <b>{flip_pnl:+.2f}$</b> ({flip_r:+.2f}R)\n"
+                                f"💰 Balans: <b>${flip_bal:.2f}</b>",
+                            )
                         upd_daily = await increment_daily_signal_count()
                         cand["daily_count"] = upd_daily["count"]
                         await db.state_set("current_trade", cand)
@@ -3313,7 +3328,7 @@ async def scanner_loop(app):
                         if png:
                             await send_telegram_photo(
                                 session, png,
-                                caption=f"🎯 <b>{cand['signal']} @ {cand['entry']}</b> | SL: {cand['sl']} | TP (2.0R): {cand['tp1']}",
+                                caption=f"{side_icon(cand['signal'])} <b>{side_txt(cand['signal'])} @ {cand['entry']}</b> | SL: {cand['sl']} | TP: {cand['tp1']}",
                             )
 
                         # Exness & Binance avto-savdo
@@ -3321,7 +3336,7 @@ async def scanner_loop(app):
                         _spawn(execute_binance_autotrades(session, dict(cand)))
 
                         # Gemini AI sharhi
-                        if GEMINI_API_KEY:
+                        if GEMINI_API_KEY and SEND_AI_EXTRA_MESSAGES:
                             _spawn(_send_ai_followup(session, dict(cand), dict(status), list(status["confirmations"])))
 
         except asyncio.CancelledError:
@@ -3335,32 +3350,23 @@ async def scanner_loop(app):
 # ==================== EXNESS HISOBLARNI FORMATLASH ====================
 async def format_exness_menu(chat_id):
     accs = await db.get_exness_accounts(chat_id)
-    mode_str = "🟢 Native MT5 Terminal" if _HAS_MT5 else "☁️ Cloud Bridge (/api/mt5_bridge/poll)"
-    lines = [
-        f"🏦 <b>EXNESS MT5 MULTI-ACCOUNT ({len(accs)}/{MAX_EXNESS_ACCOUNTS})</b>",
-        f"Rejim: <b>{mode_str}</b>",
-        f"━━━━━━━━━━━━━━━━━━━━",
-    ]
+    lines = [f"🏦 <b>Exness hisoblar ({len(accs)}/{MAX_EXNESS_ACCOUNTS})</b>"]
     if not accs:
-        lines.append("📭 Hali Exness hisob ulanmagan.\n")
+        lines.append("Hali hisob ulanmagan.")
     else:
         for a in accs:
-            st_icon = "🟢 ON" if a["auto_trade"] else "🔴 OFF"
-            bal_str = f"${a['last_balance']:.2f}" if a["last_balance"] is not None else "Noma'lum"
+            st_icon = "🟢" if a["auto_trade"] else "🔴"
+            bal_str = f"${a['last_balance']:.2f}" if a["last_balance"] is not None else "?"
             lines.append(
-                f"<b>#{a['slot']} — {html.escape(a['label'])}</b> [{st_icon}]\n"
-                f" • Login: <code>{html.escape(a['login'])}</code> | Server: <code>{html.escape(a['server'])}</code>\n"
-                f" • Simbol: <code>{html.escape(a['symbol'])}</code> | Lot: <code>{a['lot']}</code> | Balans: <b>{bal_str}</b>\n"
-                f" • Holat: <i>{html.escape(str(a['last_status']))}</i>\n"
+                f"{st_icon} #{a['slot']} <code>{html.escape(a['login'])}</code> | "
+                f"lot {a['lot']} | balans {bal_str}"
             )
-
     lines.extend([
-        "📌 <b>Buyruqlar (xavfsiz — parol xabari darhol o'chiriladi):</b>",
-        "• Ulash: <code>/exness_add LOGIN PAROL [SERVER|AUTO] [LOT]</code>",
-        "  Misol: <code>/exness_add 12345678 MyPass123 AUTO 0.01</code>",
-        "• Lot o'zgartirish: <code>/exness_lot 1 0.02</code>",
-        "• Avto-savdo Yoqish/O'chirish: <code>/exness_toggle 1</code>",
-        "• Ulanishni tekshirish: <code>/exness_test 1</code>",
+        "",
+        "• Ulash: <code>/exness_add LOGIN PAROL AUTO 0.01</code>",
+        "• Lot: <code>/exness_lot 1 0.02</code>",
+        "• Avto-savdo yoq/o'ch: <code>/exness_toggle 1</code>",
+        "• Tekshirish: <code>/exness_test 1</code>",
         "• O'chirish: <code>/exness_del 1</code>",
     ])
     return "\n".join(lines)
@@ -3407,22 +3413,17 @@ async def handle_command(session, chat_id, text, message_id=None):
 
     if cmd in ("/start", "/help"):
         msg = (
-            "👑 <b>GOLD (EXNESS / XM) SMC + ICT BOT — v19 ULTIMATE</b>\n"
-            "━━━━━━━━━━━━━━━━━━━━\n"
-            "• <b>15m + 5m LTF Sniper</b> kirishlar (FVG, OB, Breaker, OTE, Sweep)\n"
-            "• <b>Macro SMT:</b> DXY, US10Y, BTC va EUR divergensiya filtri\n"
-            "• <b>Exness MT5:</b> 3 tagacha hisobda avto-order va avto-SL (Trailing)\n\n"
-            "🔹 <b>Asosiy buyruqlar:</b>\n"
-            "• /signal — Bozor tahlili va joriy holat\n"
-            "• /chart — 15m SMC + Zona + Darajalar grafigi (PNG)\n"
-            "• /zones — Faol FVG, Order Block va Breaker zonalar\n"
-            "• /exness — Exness MT5 hisoblarni ulash va boshqarish (1-3 slot)\n"
-            "• /sync <code>2915.40</code> — Broker narxi bilan 1-bosishda sinxronlash\n"
-            "• /offset <code>-8.20</code> — Bybit va Broker farqini sozlash\n"
-            "• /balance <code>20</code> | /risk <code>10</code> — Balans va risk sozlash\n"
-            "• /close — Ochiq bitimni qo'lda yopish\n"
-            "• /ai <code>[savol]</code> — Gemini AI bozor tahlili | /model — AI model tanlash\n"
-            "• /stats — Win Rate va oxirgi bitimlar tarixi"
+            "👑 <b>GOLD BOT</b>\n"
+            "• /signal — hozirgi holat\n"
+            "• /chart — grafik\n"
+            "• /zones — kirish zonalari\n"
+            "• /balance <code>20</code> — balansni o'rnatish (bitim yopilganda o'zi o'zgaradi)\n"
+            "• /risk <code>10</code> — risk foizi\n"
+            "• /close — ochiq bitimni yopish\n"
+            "• /stats — natijalar\n"
+            "• /exness — Exness hisoblar\n"
+            "• /sync <code>2915.40</code> — broker narxiga moslash\n"
+            "• /ai <code>[savol]</code> — AI tahlil"
         )
         await send_telegram(session, msg, with_keyboard=True, chat_id=cid)
 
@@ -3460,22 +3461,21 @@ async def handle_command(session, chat_id, text, message_id=None):
         bear_z.sort(key=lambda z: abs(p - z["ce"]))
 
         lines = [
-            f"🎯 <b>FAOL 15M SMC ZONALAR (Joriy: {p})</b>",
-            f"━━━━━━━━━━━━━━━━━━━━",
-            f"🟢 <b>Bullish (Support / Demand):</b>",
+            f"🎯 <b>Zonalar (narx: {p})</b>",
+            f"🟢 <b>BUY zonalari (pastda):</b>",
         ]
         for z in bull_z[:5]:
             dist = p - z["ce"]
             lines.append(f" • <b>{z['kind']}</b>: <code>{z['bottom']:.2f} — {z['top']:.2f}</code> (CE: {z['ce']:.2f} | {dist:+.1f}$)")
         if not bull_z:
-            lines.append(" • Faol bullish zona yo'q")
+            lines.append(" • yo'q")
 
-        lines.append("\n🔴 <b>Bearish (Resistance / Supply):</b>")
+        lines.append("\n🔴 <b>SELL zonalari (tepada):</b>")
         for z in bear_z[:5]:
             dist = z["ce"] - p
             lines.append(f" • <b>{z['kind']}</b>: <code>{z['bottom']:.2f} — {z['top']:.2f}</code> (CE: {z['ce']:.2f} | +{dist:.1f}$)")
         if not bear_z:
-            lines.append(" • Faol bearish zona yo'q")
+            lines.append(" • yo'q")
 
         await send_telegram(session, "\n".join(lines), chat_id=cid)
 
@@ -3609,7 +3609,7 @@ async def handle_command(session, chat_id, text, message_id=None):
         try:
             val = max(5.0, float(parts[1].replace(",", ".")))
             await update_account(balance=val)
-            await send_telegram(session, f"💰 Balans <code>${val:.2f}</code> qilib saqlandi.", chat_id=cid)
+            await send_telegram(session, f"💰 Balans: <b>${val:.2f}</b>", chat_id=cid)
         except Exception:
             await send_telegram(session, "⚠️ Format: <code>/balance 20</code>", chat_id=cid)
 
@@ -3617,7 +3617,7 @@ async def handle_command(session, chat_id, text, message_id=None):
         try:
             val = max(0.5, min(MAX_RISK_PER_TRADE_PCT, float(parts[1].replace(",", "."))))
             await update_account(risk=val)
-            await send_telegram(session, f"⚖️ Risk <code>{val:.1f}%</code> qilib saqlandi.", chat_id=cid)
+            await send_telegram(session, f"⚖️ Risk: <b>{val:.1f}%</b>", chat_id=cid)
         except Exception:
             await send_telegram(session, f"⚠️ Format: <code>/risk 10</code> (Max: {MAX_RISK_PER_TRADE_PCT}%)", chat_id=cid)
 
@@ -3625,7 +3625,7 @@ async def handle_command(session, chat_id, text, message_id=None):
         async with _monitor_lock:
             trade = await db.state_get("current_trade")
             if not trade:
-                await send_telegram(session, "📭 Hozirda ochiq bitim yo'q.", chat_id=cid)
+                await send_telegram(session, "📭 Ochiq bitim yo'q.", chat_id=cid)
                 return
             cur_p = live_price() or (_LAST_CANDLES_15M[-1][C] if _LAST_CANDLES_15M else trade["entry"])
             await close_trade(session, trade, "MANUAL", round(cur_p, 2))
@@ -3635,10 +3635,9 @@ async def handle_command(session, chat_id, text, message_id=None):
         recent = await db.get_recent_trades(limit=10)
         uptime_h = (time.time() - _metrics["start"]) / 3600.0
         lines = [
-            f"📈 <b>SAVDO STATISTIKASI VA METRIKALAR</b>",
-            f"━━━━━━━━━━━━━━━━━━━━",
-            f"🏆 <b>{html.escape(wr_txt)}</b>",
-            f"⏱ Uptime: <code>{uptime_h:.1f} soat</code> | WS Ticks: <code>{_metrics['ws_ticks']}</code>",
+            f"📈 <b>Natijalar</b>",
+            f"🏆 {html.escape(wr_txt)}",
+            f"💰 Balans: <b>${(await get_account())['balance']:.2f}</b>",
             f"",
             f"📜 <b>Oxirgi 10 ta bitim:</b>",
         ]
@@ -3647,7 +3646,7 @@ async def handle_command(session, chat_id, text, message_id=None):
         else:
             for t in recent:
                 lines.append(
-                    f" • <b>{t['signal']}</b> | {html.escape(str(t['result']))} | "
+                    f" • <b>{side_txt(t['signal'])}</b> | {html.escape(result_txt(t['result']))} | "
                     f"<code>{t['entry']} ➡️ {t['close_price']}</code>"
                 )
         await send_telegram(session, "\n".join(lines), chat_id=cid)
@@ -3833,8 +3832,8 @@ async function loadState() {
     document.getElementById("offset").innerText = "Offset: " + (d.offset >= 0 ? "+" : "") + d.offset;
     const tb = document.getElementById("trade_box");
     if (d.trade) {
-      tb.innerHTML = `<div class="row"><span>Yo'nalish:</span><b>${d.trade.signal} @ ${d.trade.entry}</b></div>
-                      <div class="row"><span>SL / TP1 / TP2:</span><b>${d.trade.sl} / ${d.trade.tp1} / ${d.trade.tp2}</b></div>`;
+      tb.innerHTML = `<div class="row"><span>Yo'nalish:</span><b>${d.trade.signal === "LONG" ? "BUY" : "SELL"} @ ${d.trade.entry}</b></div>
+                      <div class="row"><span>SL / TP:</span><b>${d.trade.sl} / ${d.trade.tp1}</b></div>`;
     } else {
       tb.innerHTML = `<div class="row"><span>Holat:</span><span>Sniper zona kutilmoqda</span></div>
                       <div class="row"><span>EQ (50%) /WR:</span><b>${d.eq15 || '-'} | ${d.wr}</b></div>`;
