@@ -96,9 +96,12 @@ HTF_LIMIT = 120
 RR1, RR2, RR3 = 2.0, 2.0, 2.0  # Yagona TP = 2.0R (1.0R da Avto-BE+)
 SWING_LEFT, SWING_RIGHT = 3, 3
 CHECK_INTERVAL_SEC = 5
-ZONE_MAX_DISTANCE_PCT = 0.08
-ZONE_TOL_MAX_POINTS = 2.5
-MIN_SIGNAL_SCORE = 58
+ZONE_MAX_DISTANCE_PCT = 0.14
+ZONE_TOL_MAX_POINTS = 3.8
+MIN_SIGNAL_SCORE = 52
+DAILY_TARGET_SIGNALS_MIN = 7
+DAILY_TARGET_SIGNALS_MAX = 10
+SIGNAL_COOLDOWN_SEC = 900
 TRADE_STALE_WARNING_HOURS = 4
 FLIP_WARN_AFTER_SEC = 60
 FLIP_WARN_REPEAT_SEC = 300
@@ -114,8 +117,8 @@ NEWS_RETRY_SEC = 300
 DEFAULT_BALANCE_USD = 20.0
 DEFAULT_RISK_PER_TRADE_PCT = 10.0
 MAX_RISK_PER_TRADE_PCT = 25.0
-SNIPER_MIN_SL_POINTS = 1.20
-SNIPER_MAX_SL_POINTS_SMALL = 4.20
+SNIPER_MIN_SL_POINTS = 1.10
+SNIPER_MAX_SL_POINTS_SMALL = 5.50
 
 XM_MIN_LOT = 0.01
 XM_OZ_PER_MIN_LOT = 1.0
@@ -150,9 +153,9 @@ HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
 
 KILLZONES_ENABLED = True
 KILLZONES = [
-    {"name": "Asia Sweep / Pre-London", "start": datetime.time(2, 0), "end": datetime.time(6, 0)},
-    {"name": "London Open", "start": datetime.time(6, 0), "end": datetime.time(12, 0)},
-    {"name": "NY Open / Overlap", "start": datetime.time(12, 0), "end": datetime.time(20, 0)},
+    {"name": "Asia Impulse / Pre-London", "start": datetime.time(1, 0), "end": datetime.time(6, 0)},
+    {"name": "London Open / Silver Bullet", "start": datetime.time(6, 0), "end": datetime.time(12, 0)},
+    {"name": "NY Open / Overlap / PM Session", "start": datetime.time(12, 0), "end": datetime.time(21, 0)},
 ]
 SESSION_TZ = {
     "asia": "Asia/Tokyo",
@@ -1818,6 +1821,71 @@ def _fvg_is_fresh(zone, candles, max_age_bars=45, untested=False):
                 return False
     return True
 
+def detect_ifvg(candles, min_size=0.20):
+    """ICT Inversion Fair Value Gap (IFVG): Impuls bilan buzilgan FVG teskari zonaga aylanadi."""
+    raw_fvgs = detect_fvg(candles, min_size=min_size)
+    ifvgs = []
+    n = len(candles)
+    for z in raw_fvgs:
+        fi = z["index"]
+        if n - 1 - fi > 45:
+            continue
+        inv_idx = None
+        inv_type = None
+        check_end = max(fi + 1, n - 1)
+        for j in range(fi + 1, check_end):
+            c = candles[j]
+            if z["type"] == "bearish" and c[C] > z["top"]:
+                inv_idx = j
+                inv_type = "bullish"
+                break
+            if z["type"] == "bullish" and c[C] < z["bottom"]:
+                inv_idx = j
+                inv_type = "bearish"
+                break
+        if inv_idx is not None and (n - 1 - inv_idx <= 28):
+            still_valid = True
+            for k in range(inv_idx + 1, max(inv_idx + 1, n - 2)):
+                ck = candles[k]
+                if inv_type == "bullish" and ck[C] < z["bottom"]:
+                    still_valid = False
+                    break
+                if inv_type == "bearish" and ck[C] > z["top"]:
+                    still_valid = False
+                    break
+            if still_valid:
+                ifvgs.append({
+                    "type": inv_type, "kind": "IFVG",
+                    "top": z["top"], "bottom": z["bottom"],
+                    "ce": z["ce"], "index": inv_idx,
+                    "algo_candle": True, "has_idm": True,
+                })
+    return ifvgs
+
+def check_ict_silver_bullet_and_macro():
+    """ICT Silver Bullet (03-04, 10-11, 14-15 NY) va 20-daq Macro (xx:50-xx:10) oynalari."""
+    now_utc = datetime.datetime.now(datetime.timezone.utc)
+    if _HAS_ZONEINFO:
+        try:
+            ny_dt = now_utc.astimezone(ZoneInfo("America/New_York"))
+        except Exception:
+            ny_dt = now_utc - datetime.timedelta(hours=4)
+    else:
+        ny_dt = now_utc - datetime.timedelta(hours=4)
+
+    ny_h, ny_m = ny_dt.hour, ny_dt.minute
+    sb_name = None
+    if ny_h == 3:
+        sb_name = "ICT London Silver Bullet (03:00-04:00 NY)"
+    elif ny_h == 10:
+        sb_name = "ICT NY AM Silver Bullet (10:00-11:00 NY)"
+    elif ny_h == 14:
+        sb_name = "ICT NY PM Silver Bullet (14:00-15:00 NY)"
+
+    is_macro = (ny_m >= 50 or ny_m <= 10)
+    macro_name = f"ICT 20m Macro ({ny_h:02d}:{ny_m:02d} NY)" if is_macro else None
+    return {"silver_bullet": sb_name, "macro": macro_name}
+
 def get_active_zones(candles, cache_key="XAU_15m"):
     if not candles:
         return []
@@ -1828,21 +1896,22 @@ def get_active_zones(candles, cache_key="XAU_15m"):
         return cached["zones"]
 
     atr = calculate_atr(candles) or 0.0
-    min_size = max(0.30, atr * 0.10)
+    min_size = max(0.22, atr * 0.08)
     untested = FVG_REQUIRE_UNTESTED and cache_key == "XAU_15m"
     fvgs = [z for z in detect_fvg(candles, min_size) if _fvg_is_fresh(z, candles, untested=untested)]
+    ifvgs = detect_ifvg(candles, min_size=min_size)
     obs_bbs = detect_ob_and_breakers(candles)
-    fus = [z for z in detect_fu_candles(candles) if _fvg_is_fresh(z, candles, max_age_bars=30)]
-    all_fresh = fvgs + obs_bbs + fus
+    fus = [z for z in detect_fu_candles(candles) if _fvg_is_fresh(z, candles, max_age_bars=35)]
+    all_fresh = fvgs + ifvgs + obs_bbs + fus
     _zones_cache[full_key] = {"ts": ts, "zones": all_fresh}
     return all_fresh
 
-def check_5m_ltf_trigger(cl5, struct5, target_bias, zone=None):
+def check_5m_ltf_trigger(cl5, struct5, target_bias, zone=None, cl1=None):
     triggers = []
     if struct5["bias"] == target_bias:
         ev = struct5.get("event") or ""
         ev_bar = struct5.get("event_bar", -1)
-        if ev_bar >= 0 and (len(cl5) - 1 - ev_bar) <= 10:
+        if ev_bar >= 0 and (len(cl5) - 1 - ev_bar) <= 14:
             if "CHoCH" in ev:
                 triggers.append("5m CHoCH (MSS)")
             elif "BOS" in ev:
@@ -1851,31 +1920,50 @@ def check_5m_ltf_trigger(cl5, struct5, target_bias, zone=None):
     zones_5m = get_active_zones(cl5, cache_key="XAU_5m")
     recent_5m_zones = [
         z for z in zones_5m
-        if z["type"] == target_bias and (len(cl5) - 1 - z["index"] <= 6)
+        if z["type"] == target_bias and (len(cl5) - 1 - z["index"] <= 8)
     ]
     if recent_5m_zones:
         triggers.append(f"5m {recent_5m_zones[-1]['kind']} Displacement")
 
-    if len(cl5) >= 2:
-        last, prev = cl5[-1], cl5[-2]
+    if len(cl5) >= 3:
+        last, prev, prev2 = cl5[-1], cl5[-2], cl5[-3]
         rng = max(last[H] - last[L], 0.01)
+        body = abs(last[C] - last[O])
         upper_wick = last[H] - max(last[O], last[C])
         lower_wick = min(last[O], last[C]) - last[L]
         touches = True
         if zone is not None:
-            touches = last[L] <= zone["top"] + 1.2 and last[H] >= zone["bottom"] - 1.2
+            touches = (
+                min(last[L], prev[L]) <= zone["top"] + 1.8
+                and max(last[H], prev[H]) >= zone["bottom"] - 1.8
+            )
 
         if touches:
             if target_bias == "bullish":
-                if last[C] > last[O] and prev[C] < prev[O] and last[C] > prev[O]:
+                if last[C] > last[O] and prev[C] < prev[O] and last[C] >= prev[O]:
                     triggers.append("5m Bullish Engulfing")
-                elif lower_wick / rng >= 0.50 and last[C] >= last[O]:
-                    triggers.append("5m Bullish Pinbar")
+                elif lower_wick / rng >= 0.42 and last[C] >= last[O]:
+                    triggers.append("5m Bullish Rejection Pin")
+                elif last[C] > last[O] and body / rng >= 0.65 and last[C] > prev[H]:
+                    triggers.append("5m Bullish Displacement Close")
+                elif last[L] < prev[L] and last[C] > prev[C] and last[C] > last[O]:
+                    triggers.append("5m Micro Liquidity Grab + Close")
             else:
-                if last[C] < last[O] and prev[C] > prev[O] and last[C] < prev[O]:
+                if last[C] < last[O] and prev[C] > prev[O] and last[C] <= prev[O]:
                     triggers.append("5m Bearish Engulfing")
-                elif upper_wick / rng >= 0.50 and last[C] <= last[O]:
-                    triggers.append("5m Bearish Pinbar")
+                elif upper_wick / rng >= 0.42 and last[C] <= last[O]:
+                    triggers.append("5m Bearish Rejection Pin")
+                elif last[C] < last[O] and body / rng >= 0.65 and last[C] < prev[L]:
+                    triggers.append("5m Bearish Displacement Close")
+                elif last[H] > prev[H] and last[C] < prev[C] and last[C] < last[O]:
+                    triggers.append("5m Micro Liquidity Grab + Close")
+
+    if cl1 and len(cl1) >= 20:
+        struct1 = analyze_market_structure(cl1, cache_key="XAU_1m")
+        if struct1.get("bias") == target_bias:
+            ev1 = struct1.get("event") or ""
+            if "CHoCH" in ev1 or "BOS" in ev1:
+                triggers.append(f"1m Sniper {ev1}")
 
     return triggers
 
@@ -2313,15 +2401,18 @@ async def _fetch_corr(session, symbol, key):
         return None
 
 # ==================== 20$ SNIPER TRADE BUILDER ====================
-def build_sniper_trade(cl15, cl5, struct15, price, atr15, balance):
-    bias = struct15["bias"]
+def build_sniper_trade(cl15, cl5, struct15, price, atr15, balance, target_bias=None, setup_model="MTF Trend Sniper"):
+    bias = target_bias or struct15["bias"]
+    if bias not in ("bullish", "bearish"):
+        return None
     zones_15m = [z for z in get_active_zones(cl15, "XAU_15m") if z["type"] == bias]
     zones_5m = [z for z in get_active_zones(cl5, "XAU_5m") if z["type"] == bias]
     zones_bias = zones_15m + zones_5m
     if not zones_bias:
         return None
 
-    tol = min(price * (ZONE_MAX_DISTANCE_PCT / 100.0), ZONE_TOL_MAX_POINTS)
+    dyn_tol = max(ZONE_TOL_MAX_POINTS, (atr15 * 0.85) if atr15 else ZONE_TOL_MAX_POINTS)
+    tol = min(price * (ZONE_MAX_DISTANCE_PCT / 100.0), dyn_tol)
     candidates = []
     for z in zones_bias:
         lo, hi = min(z["bottom"], z["top"]), max(z["bottom"], z["top"])
@@ -2330,7 +2421,9 @@ def build_sniper_trade(cl15, cl5, struct15, price, atr15, balance):
     if not candidates:
         return None
 
-    candidates.sort(key=lambda z: abs(price - z["ce"]))
+    # Ustuvorlik: IFVG / AC_OB / FU va narxga eng yaqin CE
+    kind_priority = {"IFVG": 0, "AC_OB": 0, "FU": 0, "BB": 1, "OB": 1, "FVG": 2}
+    candidates.sort(key=lambda z: (kind_priority.get(z["kind"], 3), abs(price - z["ce"])))
     zone = candidates[0]
     zone_lo = min(zone["bottom"], zone["top"])
     zone_hi = max(zone["bottom"], zone["top"])
@@ -2338,25 +2431,35 @@ def build_sniper_trade(cl15, cl5, struct15, price, atr15, balance):
     confluence = any(
         other is not zone
         and other["kind"] != zone["kind"]
-        and other["bottom"] <= zone["top"]
-        and other["top"] >= zone["bottom"]
+        and other["bottom"] <= zone["top"] + 0.5
+        and other["top"] >= zone["bottom"] - 0.5
         for other in zones_bias
     )
 
     is_small_acc = (balance or DEFAULT_BALANCE_USD) <= 60.0
-    max_sl_pts = SNIPER_MAX_SL_POINTS_SMALL if is_small_acc else (atr15 * 2.5 if atr15 else 6.0)
+    atr_cap = max(SNIPER_MAX_SL_POINTS_SMALL, round((atr15 or 3.0) * 1.45, 2))
+    max_sl_pts = min(6.50, atr_cap) if is_small_acc else max(7.50, (atr15 * 2.5 if atr15 else 7.5))
     min_sl_pts = SNIPER_MIN_SL_POINTS
 
-    recent_5m_low = min(c[L] for c in cl5[-4:]) if len(cl5) >= 4 else zone_lo
-    recent_5m_high = max(c[H] for c in cl5[-4:]) if len(cl5) >= 4 else zone_hi
+    recent_5m_low = min(c[L] for c in cl5[-3:]) if len(cl5) >= 3 else zone_lo
+    recent_5m_high = max(c[H] for c in cl5[-3:]) if len(cl5) >= 3 else zone_hi
     entry = round(price, 2)
 
     if bias == "bullish":
-        structural_sl = min(zone_lo - 0.30, recent_5m_low - 0.25) - XM_SPREAD_BUFFER
+        structural_sl = min(zone_lo - 0.25, recent_5m_low - 0.20) - XM_SPREAD_BUFFER
         raw_risk = entry - structural_sl
+        if raw_risk > max_sl_pts:
+            # Katta zonada CE / 5m candle low asosida tight sniper SL
+            tight_sl = min(zone["ce"] - 0.65, cl5[-1][L] - 0.35) - XM_SPREAD_BUFFER
+            if 0 < (entry - tight_sl) <= max_sl_pts:
+                raw_risk = entry - tight_sl
     else:
-        structural_sl = max(zone_hi + 0.30, recent_5m_high + 0.25) + XM_SPREAD_BUFFER
+        structural_sl = max(zone_hi + 0.25, recent_5m_high + 0.20) + XM_SPREAD_BUFFER
         raw_risk = structural_sl - entry
+        if raw_risk > max_sl_pts:
+            tight_sl = max(zone["ce"] + 0.65, cl5[-1][H] + 0.35) + XM_SPREAD_BUFFER
+            if 0 < (tight_sl - entry) <= max_sl_pts:
+                raw_risk = tight_sl - entry
 
     if raw_risk <= 0:
         return None
@@ -2369,6 +2472,7 @@ def build_sniper_trade(cl15, cl5, struct15, price, atr15, balance):
     return {
         "signal": "LONG" if bias == "bullish" else "SHORT",
         "bias": bias,
+        "setup_model": setup_model,
         "zone_kind": zone["kind"],
         "zone_top": round(zone_hi, 2),
         "zone_bottom": round(zone_lo, 2),
@@ -2694,12 +2798,13 @@ async def monitor_trade(session, price, bias15):
             except Exception:
                 trade["stale_warned"] = True
 
-        # 1) +1.0R ga yetganda YOKI +0.6R foydada 5m BOS bo'lganda SL ni Avto-Bezubitokka (BE+) ko'chirish
+        # 1) +0.65R ga yetganda SL ni darhol Avto-Bezubitokka (BE+) ko'chirish (yangi intraday to'lqinlarni ochish uchun)
+        fast_be_trigger = round(entry + risk_pts * 0.65, 2) if is_long else round(entry - risk_pts * 0.65, 2)
         bos_be_ready = (
-            reached(round(entry + risk_pts * 0.60, 2) if is_long else round(entry - risk_pts * 0.60, 2))
+            reached(round(entry + risk_pts * 0.50, 2) if is_long else round(entry - risk_pts * 0.50, 2))
             and bias15 == trade["bias"]
         )
-        if (reached(be_trigger) or bos_be_ready) and not trade.get("tp1_notified"):
+        if (reached(fast_be_trigger) or reached(be_trigger) or bos_be_ready) and not trade.get("tp1_notified"):
             trade["tp1_notified"] = True
             trade["breakeven"] = True
             be_lock = max(risk_pts * 0.20, 0.30)
@@ -2811,12 +2916,33 @@ async def check_news_window(session):
     return False, None
 
 # ==================== UNIFIED INSTITUTIONAL MARKET ANALYSIS ====================
+async def get_daily_signal_info():
+    """Bugungi (UZT) yuborilgan signallar sonini kuzatish (7-10 ta sifatli signal balansi uchun)."""
+    today_str = uzt_now().strftime("%Y-%m-%d")
+    info = await db.state_get("daily_signals", {"date": today_str, "count": 0, "last_ts": 0})
+    if info.get("date") != today_str:
+        info = {"date": today_str, "count": 0, "last_ts": info.get("last_ts", 0)}
+        await db.state_set("daily_signals", info)
+    return info
+
+async def increment_daily_signal_count():
+    info = await get_daily_signal_info()
+    info["count"] = int(info.get("count", 0)) + 1
+    info["last_ts"] = int(time.time())
+    await db.state_set("daily_signals", info)
+    return info
+
 async def analyze_gold_market(session, run_deep_scoring=True):
     global _LAST_CANDLES_15M, _LAST_STRUCT_15M, _LIVE_BYBIT_RAW_PRICE
-    c5, c15 = await asyncio.gather(
+    c1, c5, c15 = await asyncio.gather(
+        fetch_ohlcv(session, "1m", limit=90),
         fetch_ohlcv(session, "5m", limit=LIMIT),
         fetch_ohlcv(session, "15m", limit=LIMIT),
+        return_exceptions=True,
     )
+    if isinstance(c5, Exception) or isinstance(c15, Exception):
+        raise RuntimeError(f"OHLCV xato: {c5 if isinstance(c5, Exception) else c15}")
+    cl1 = closed_only(c1) if not isinstance(c1, Exception) else []
     htf = await fetch_htf_context(session)
     b1h, b4h, b1d = htf["b1h"], htf["b4h"], htf["b1d"]
     pdh, pdl = htf["pdh"], htf["pdl"]
@@ -2837,113 +2963,173 @@ async def analyze_gold_market(session, run_deep_scoring=True):
     b5 = struct5["bias"]
     b15 = struct15["bias"]
     sweeps = detect_asia_and_pd_sweeps(cl15, pdh, pdl)
+    sweep15 = detect_liquidity_sweep(cl15, cache_key="XAU_15m")
+    sweep5 = detect_liquidity_sweep(cl5, cache_key="XAU_5m")
     eqh, eql = detect_equal_highs_lows(cl15, cache_key="XAU_15m")
     atr15 = calculate_atr(cl15)
     vwap15 = calculate_vwap(cl15)
     zones15 = get_active_zones(cl15, cache_key="XAU_15m")
     news_blocked, news_title = await check_news_window(session)
     session_name = current_session()
+    ict_windows = check_ict_silver_bullet_and_macro()
 
     acc = await get_account()
     candidate = None
     confirmations = []
     score = 0
 
-    if run_deep_scoring and b15 in ("bullish", "bearish") and not (b1h and b4h and b1h != b15 and b4h != b15):
-        candidate = build_sniper_trade(cl15, cl5, struct15, price, atr15, acc["balance"])
-        if candidate:
-            ltf_triggers = check_5m_ltf_trigger(
-                cl5, struct5, b15,
-                zone={"top": candidate["zone_top"], "bottom": candidate["zone_bottom"]},
+    if run_deep_scoring:
+        # 3-MODEL TOP-TRADER SETUP SELECTION:
+        # 1) Model 1: MTF Trend Sniper (15m bias yo'nalishida)
+        # 2) Model 2: ICT Turtle Soup / Liquidity Sweep Reversal (PDH/PDL, Asia H/L yoki 15m Sweep + 5m CHoCH/MSS)
+        # 3) Model 3: ICT Silver Bullet / 5m IFVG Intraday Scalp (5m bias + 1H/OrderFlow uyg'unligi)
+        setup_trials = []
+        if b15 in ("bullish", "bearish") and not (b1h and b4h and b1h != b15 and b4h != b15):
+            setup_trials.append((b15, "Model 1: MTF Trend Sniper"))
+
+        has_bull_liq_raid = bool(sweeps.get("bull_sweep") or sweep15 == "bullish_sweep" or sweep5 == "bullish_sweep")
+        has_bear_liq_raid = bool(sweeps.get("bear_sweep") or sweep15 == "bearish_sweep" or sweep5 == "bearish_sweep")
+
+        if has_bull_liq_raid and b5 == "bullish":
+            setup_trials.append(("bullish", "Model 2: ICT Liquidity Sweep Reversal"))
+        if has_bear_liq_raid and b5 == "bearish":
+            setup_trials.append(("bearish", "Model 2: ICT Liquidity Sweep Reversal"))
+
+        if b5 in ("bullish", "bearish") and (ict_windows["silver_bullet"] or ict_windows["macro"] or b5 == b1h):
+            if all(t[0] != b5 for t in setup_trials):
+                setup_trials.append((b5, "Model 3: ICT Silver Bullet / 5m Scalp"))
+
+        for trial_bias, model_name in setup_trials:
+            cand_try = build_sniper_trade(
+                cl15, cl5, struct15, price, atr15, acc["balance"],
+                target_bias=trial_bias, setup_model=model_name,
             )
-            if not ltf_triggers:
-                candidate = None
-            else:
-                rsis15 = calculate_rsi(cl15)
-                bull_div, bear_div = detect_rsi_divergence(cl15, rsis15)
-                sweep15 = detect_liquidity_sweep(cl15, cache_key="XAU_15m")
-                delta15 = order_flow_delta(cl15)
-                vp15 = volume_profile(cl15)
+            if not cand_try:
+                continue
+            ltf_triggers = check_5m_ltf_trigger(
+                cl5, struct5, trial_bias,
+                zone={"top": cand_try["zone_top"], "bottom": cand_try["zone_bottom"]},
+                cl1=cl1,
+            )
+            if ltf_triggers:
+                candidate = cand_try
+                break
 
-                btc_cl, eur_cl = await asyncio.gather(
-                    _fetch_corr(session, BTC_SYMBOL, "BTC"),
-                    _fetch_corr(session, EUR_SYMBOL, "EUR"),
-                )
-                btc_bias = confirmed_structure_bias(btc_cl, cache_key="BTC_15m") if btc_cl else None
-                eur_bias = confirmed_structure_bias(eur_cl, cache_key="EUR_15m") if eur_cl else None
-                smt_btc = detect_smt_divergence(cl15, btc_cl, "BTC_15m") if btc_cl else None
-                smt_eur = detect_smt_divergence(cl15, eur_cl, "EUR_15m") if eur_cl else None
+        if candidate:
+            active_bias = candidate["bias"]
+            eval_struct = dict(struct15)
+            eval_struct["bias"] = active_bias
 
-                mtf = mtf_alignment_score(b5, b15, b1h, b4h)
-                score, grade, confirmations = evaluate_institutional_score(
-                    struct15, price, ltf_triggers, mtf, vwap15, bull_div, bear_div,
-                    btc_bias, eur_bias, smt_eur, smt_btc, candidate["confluence"],
-                    sweep15, sweeps, eqh, eql, delta15, vp15, session_name
-                )
+            rsis15 = calculate_rsi(cl15)
+            bull_div, bear_div = detect_rsi_divergence(cl15, rsis15)
+            delta15 = order_flow_delta(cl15)
+            delta5 = order_flow_delta(cl5)
+            vp15 = volume_profile(cl15)
 
-                macro = await get_macro_dxy_context(session, cl15)
-                if b15 == "bullish":
-                    if macro.get("dxy_smt") == "bullish":
-                        score += 8
-                        confirmations.append("Macro SMT: DXY Inverse Bullish (+8)")
-                    elif macro.get("dxy_bias") == "bearish":
-                        score += 4
-                        confirmations.append("DXY Bearish Bias (+4)")
-                    if macro.get("us10y_bias") == "bearish":
-                        score += 3
-                        confirmations.append("US10Y Yield Bearish (+3)")
-                else:
-                    if macro.get("dxy_smt") == "bearish":
-                        score += 8
-                        confirmations.append("Macro SMT: DXY Inverse Bearish (+8)")
-                    elif macro.get("dxy_bias") == "bullish":
-                        score += 4
-                        confirmations.append("DXY Bullish Bias (+4)")
-                    if macro.get("us10y_bias") == "bullish":
-                        score += 3
-                        confirmations.append("US10Y Yield Bullish (+3)")
+            btc_cl, eur_cl = await asyncio.gather(
+                _fetch_corr(session, BTC_SYMBOL, "BTC"),
+                _fetch_corr(session, EUR_SYMBOL, "EUR"),
+            )
+            btc_bias = confirmed_structure_bias(btc_cl, cache_key="BTC_15m") if btc_cl else None
+            eur_bias = confirmed_structure_bias(eur_cl, cache_key="EUR_15m") if eur_cl else None
+            smt_btc = detect_smt_divergence(cl15, btc_cl, "BTC_15m") if btc_cl else None
+            smt_eur = detect_smt_divergence(cl15, eur_cl, "EUR_15m") if eur_cl else None
 
-                adj, mem_notes = await get_learned_adjustments(confirmations)
-                if adj != 0:
-                    score += adj
-                    confirmations.extend(mem_notes)
+            mtf = mtf_alignment_score(b5, active_bias, b1h, b4h)
+            score, grade, confirmations = evaluate_institutional_score(
+                eval_struct, price, ltf_triggers, mtf, vwap15, bull_div, bear_div,
+                btc_bias, eur_bias, smt_eur, smt_btc, candidate["confluence"],
+                sweep15 or sweep5, sweeps, eqh, eql, delta15, vp15, session_name
+            )
 
-                # FU Candle, Algo Candle va IDM uchun qo'shimcha ball
-                if candidate.get("zone_kind") in ("FU", "AC_OB") or candidate.get("algo_candle"):
+            confirmations.insert(0, candidate.get("setup_model", "SMC Sniper"))
+
+            # ICT Silver Bullet & 20m Macro Window bonuslari
+            if ict_windows["silver_bullet"]:
+                score += 8
+                confirmations.append(f"{ict_windows['silver_bullet']} (+8)")
+            elif ict_windows["macro"]:
+                score += 5
+                confirmations.append(f"{ict_windows['macro']} (+5)")
+
+            # 5m Order Flow Delta tasdig'i
+            if (active_bias == "bullish" and delta5 > 0) or (active_bias == "bearish" and delta5 < 0):
+                score += 4
+                confirmations.append(f"5m OrderFlow Impulse ({delta5:+.1f} +4)")
+
+            macro = await get_macro_dxy_context(session, cl15)
+            if active_bias == "bullish":
+                if macro.get("dxy_smt") == "bullish":
                     score += 8
-                    confirmations.append(f"ICT {candidate['zone_kind']} (Algo/Wick 50% +8)")
-                if candidate.get("has_idm"):
-                    score += 6
-                    confirmations.append("IDM (Inducement Swept +6)")
+                    confirmations.append("Macro SMT: DXY Inverse Bullish (+8)")
+                elif macro.get("dxy_bias") == "bearish":
+                    score += 4
+                    confirmations.append("DXY Bearish Bias (+4)")
+                if macro.get("us10y_bias") == "bearish":
+                    score += 3
+                    confirmations.append("US10Y Yield Bearish (+3)")
+            else:
+                if macro.get("dxy_smt") == "bearish":
+                    score += 8
+                    confirmations.append("Macro SMT: DXY Inverse Bearish (+8)")
+                elif macro.get("dxy_bias") == "bullish":
+                    score += 4
+                    confirmations.append("DXY Bullish Bias (+4)")
+                if macro.get("us10y_bias") == "bullish":
+                    score += 3
+                    confirmations.append("US10Y Yield Bullish (+3)")
 
-                # NY Midnight Open (Judas Swing) filtri
-                d_open = sweeps.get("daily_open_ny")
-                if d_open:
-                    if b15 == "bullish" and price < d_open:
-                        score += 5
-                        confirmations.append(f"Below NY 00:00 Open ({d_open} +5)")
-                    elif b15 == "bearish" and price > d_open:
-                        score += 5
-                        confirmations.append(f"Above NY 00:00 Open ({d_open} +5)")
+            adj, mem_notes = await get_learned_adjustments(confirmations)
+            if adj != 0:
+                score += adj
+                confirmations.extend(mem_notes)
 
-                # Trading in the Zone: Anti-Tilt & Anti-Euphoria
-                psych = await check_psychology_guard()
-                if psych["note"]:
-                    confirmations.append(psych["note"])
-                effective_risk = round(acc["risk_pct"] * psych["risk_mult"], 2)
+            # IFVG, FU Candle, Algo Candle va IDM uchun qo'shimcha ball
+            if candidate.get("zone_kind") in ("IFVG", "FU", "AC_OB") or candidate.get("algo_candle"):
+                score += 8
+                confirmations.append(f"ICT {candidate['zone_kind']} (Algo/Inversion +8)")
+            if candidate.get("has_idm"):
+                score += 6
+                confirmations.append("IDM (Inducement Swept +6)")
 
-                score = max(0, min(100, score))
-                grade = "A+" if score >= 80 else ("A" if score >= 68 else "B+")
+            # NY Midnight Open (Judas Swing) filtri
+            d_open = sweeps.get("daily_open_ny")
+            if d_open:
+                if active_bias == "bullish" and price < d_open:
+                    score += 5
+                    confirmations.append(f"Below NY 00:00 Open ({d_open} +5)")
+                elif active_bias == "bearish" and price > d_open:
+                    score += 5
+                    confirmations.append(f"Above NY 00:00 Open ({d_open} +5)")
 
-                lot, usd_risk = calc_xm_lot_and_risk(
-                    candidate["entry"], candidate["sl"], acc["balance"], effective_risk
-                )
-                candidate["min_req_score"] = MIN_SIGNAL_SCORE + psych["score_add"]
-                candidate["score"] = score
-                candidate["grade"] = grade
-                candidate["lot"] = lot
-                candidate["risk_usd"] = usd_risk
-                candidate["confirmations"] = ", ".join(confirmations)
+            # Trading in the Zone: Anti-Tilt & Anti-Euphoria + Kunlik 7-10 Signal Pacing
+            psych = await check_psychology_guard()
+            if psych["note"]:
+                confirmations.append(psych["note"])
+            effective_risk = round(acc["risk_pct"] * psych["risk_mult"], 2)
+
+            daily_info = await get_daily_signal_info()
+            daily_cnt = daily_info.get("count", 0)
+            # Kuniga 7 tagacha signal uchun standart 52 ball, 8-10-signallar uchun faqat A/A+ (64+ ball)
+            pacing_add = 0
+            if daily_cnt >= DAILY_TARGET_SIGNALS_MAX:
+                pacing_add = 22  # 10 tadan keyin faqat ultra A+ (74+)
+            elif daily_cnt >= DAILY_TARGET_SIGNALS_MIN:
+                pacing_add = 12  # 7 tadan keyin faqat A/A+ (64+)
+
+            score = max(0, min(100, score))
+            grade = "A+" if score >= 80 else ("A" if score >= 68 else "B+")
+
+            lot, usd_risk = calc_xm_lot_and_risk(
+                candidate["entry"], candidate["sl"], acc["balance"], effective_risk
+            )
+            candidate["min_req_score"] = MIN_SIGNAL_SCORE + psych["score_add"] + pacing_add
+            candidate["daily_count"] = daily_cnt + 1
+            candidate["score"] = score
+            candidate["grade"] = grade
+            candidate["lot"] = lot
+            candidate["risk_usd"] = usd_risk
+            candidate["confirmations"] = ", ".join(confirmations)
 
     return {
         "price": price,
@@ -2979,10 +3165,13 @@ def format_signal_message(trade, status, acc):
     tp_pts = abs(trade["tp1"] - trade["entry"])
     tp_usd = round((trade["lot"] / XM_MIN_LOT) * tp_pts * XM_OZ_PER_MIN_LOT, 2)
 
+    daily_num = trade.get("daily_count", 1)
+    setup_mdl = trade.get("setup_model", "SMC Intraday Sniper")
     lines = [
-        f"🎯 <b>GOLD SNIPER SIGNAL — v19 ULTIMATE</b>",
+        f"🎯 <b>GOLD SNIPER SIGNAL — v20 TOP-TRADER (#{daily_num}/{DAILY_TARGET_SIGNALS_MAX})</b>",
         f"━━━━━━━━━━━━━━━━━━━━",
         f"Yo'nalish: {side_emoji} | Daraja: <b>{trade.get('grade', 'A')} ({trade.get('score', 0)}/100)</b>",
+        f"Model: <b>{html.escape(setup_mdl)}</b>",
         f"Zona: <b>{html.escape(trade['zone_kind'])}</b> (<code>{trade['zone_bottom']} — {trade['zone_top']}</code>)",
         f"",
         f"📍 <b>Kirish (Entry):</b> <code>{trade['entry']}</code>",
@@ -3074,13 +3263,24 @@ async def scanner_loop(app):
                 await monitor_trade(session, price, status["b15"])
                 trade = await db.state_get("current_trade")
 
-            # 3) Yangi Sniper signal tekshirish (bitim yo'q bo'lsa YOKI avvalgisi TP1 olib BE+ ga o'tgan bo'lsa)
+            # 3) Yangi Sniper signal tekshirish (Kuniga 7-10 ta sifatli signal uchun Multi-Wave + Reversal Flip)
             cand = status.get("candidate")
-            can_open_new = (trade is None) or (
-                trade.get("tp1_notified") and cand and cand.get("signal") == trade.get("signal")
+            daily_info = await get_daily_signal_info()
+            cooldown_ok = (time.time() - daily_info.get("last_ts", 0)) >= SIGNAL_COOLDOWN_SEC
+            is_reversal_flip = (
+                trade is not None
+                and cand is not None
+                and cand.get("signal") != trade.get("signal")
+                and cand.get("score", 0) >= 68
+                and cooldown_ok
+            )
+            can_open_new = (
+                (trade is None and cooldown_ok)
+                or (trade is not None and trade.get("tp1_notified") and cooldown_ok)
+                or is_reversal_flip
             )
             if can_open_new:
-                cur_bar_ts = cl15[-1][0] if cl15 else 0
+                cur_bar_ts = f"{cl15[-1][0]}_{cand.get('signal')}_{cand.get('zone_kind')}_{cand.get('zone_bottom')}" if (cl15 and cand) else 0
                 if (
                     cand
                     and cand.get("score", 0) >= cand.get("min_req_score", MIN_SIGNAL_SCORE)
@@ -3089,15 +3289,18 @@ async def scanner_loop(app):
                     and cur_bar_ts != last_signal_bar_ts
                 ):
                     async with _monitor_lock:
-                        # Agar avvalgi bitim BE+ da bo'lsa, uni statistikaga yozib qo'yamiz
-                        if trade and trade.get("tp1_notified"):
+                        if trade:
+                            close_lbl = "BE+" if trade.get("tp1_notified") else "REVERSAL_FLIP"
                             await db.insert_trade(
-                                trade, "BE+", price,
+                                trade, close_lbl, price,
                                 trade.get("lot", XM_MIN_LOT),
                                 trade.get("risk_usd", 0.0),
                                 trade.get("confirmations", ""),
                             )
                             _metrics["closed"] += 1
+                            _spawn(sync_exness_positions_action(action="close"))
+                        upd_daily = await increment_daily_signal_count()
+                        cand["daily_count"] = upd_daily["count"]
                         await db.state_set("current_trade", cand)
                         last_signal_bar_ts = cur_bar_ts
                         _metrics["signals"] += 1
