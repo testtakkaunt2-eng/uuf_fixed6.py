@@ -2934,10 +2934,10 @@ async def monitor_trade(session, price, bias15):
                 trade["sl"] = new_sl
             notes.append(f"🛡 {side_txt(side)}: Narx +1.5R yurdi! SL foydaga surildi → <code>{trade['sl']}</code>")
 
-        # 2) +2.2R dan oshganda erkin Trailing SL (narxni bo'g'ib qo'ymasdan struktura ortidan yuradi)
-        trail_start_r = round(entry + risk_pts * 2.20, 2) if is_long else round(entry - risk_pts * 2.20, 2)
+        # 2) +3.0R dan oshgandagina Trailing SL (otkatda erta chiqib ketmaslik uchun)
+        trail_start_r = round(entry + risk_pts * 3.00, 2) if is_long else round(entry - risk_pts * 3.00, 2)
         if trade.get("tp1_notified") and reached(trail_start_r):
-            trail_sl = round(price - risk_pts * 1.20, 2) if is_long else round(price + risk_pts * 1.20, 2)
+            trail_sl = round(price - risk_pts * 1.80, 2) if is_long else round(price + risk_pts * 1.80, 2)
             if better_sl(trail_sl, trade["sl"]) and abs(trail_sl - trade["sl"]) > 1.00:
                 trade["sl"] = trail_sl
                 last_noted = trade.get("last_trail_note_sl")
@@ -3366,7 +3366,6 @@ async def scanner_loop(app):
             )
             can_open_new = (
                 (trade is None and cooldown_ok)
-                or (trade is not None and trade.get("tp1_notified") and cooldown_ok)
                 or is_reversal_flip
             )
             if can_open_new:
