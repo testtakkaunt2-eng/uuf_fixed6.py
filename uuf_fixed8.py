@@ -93,16 +93,16 @@ BYBIT_WS_URL = os.environ.get("BYBIT_WS_URL", "wss://stream.bybit.com/v5/public/
 LIMIT = 240
 HTF_LIMIT = 120
 
-RR1, RR2, RR3 = 3.5, 3.5, 3.5  # Range HH/LL gacha kamida 1:3 - 1:4.5 RR (faqat range o'chiq bo'lsa ishlatiladi)
+RR1, RR2, RR3 = 3.5, 3.5, 3.5  # Yagona Day-Trading TP: kamida 1:3.5 RR
 SWING_LEFT, SWING_RIGHT = 3, 3
 CHECK_INTERVAL_SEC = 5
-ZONE_MAX_DISTANCE_PCT = 0.16
-ZONE_TOL_MAX_POINTS = 4.2
-MIN_SIGNAL_SCORE = 72          # Intraday Sniper v20: 75-80% Win Rate uchun kuchaytirilgan filtr
-DAILY_TARGET_SIGNALS_MIN = 1   # Kuniga 1-3 ta haqiqiy Intraday / Day-Trading bitim (scalp emas!)
+ZONE_MAX_DISTANCE_PCT = 0.10   # Faqat zonaning ichidan/uchidan kirish (0.16 dan qisqartirildi)
+ZONE_TOL_MAX_POINTS = 2.0      # Zonadan uzoqlashib ketgan narxga kirmaydi
+MIN_SIGNAL_SCORE = 75          # Faqat eng kuchli A/A+ Sniper signallar
+DAILY_TARGET_SIGNALS_MIN = 1   # Kuniga 1-3 ta haqiqiy Day-Trading bitim (scalp emas!)
 DAILY_TARGET_SIGNALS_MAX = 3
-SIGNAL_COOLDOWN_SEC = 14400     # Signallar orasida kamida 4 soat (14400s) — scalp kabi tez ochilib-yopilmaydi
-INTRADAY_MIN_HOLD_SEC = 7200    # Minimal ushlab turish nazorati (2-8 soatlik intraday to'lqin)
+SIGNAL_COOLDOWN_SEC = 14400    # Signallar orasida kamida 4 soat (14400s)
+INTRADAY_MIN_HOLD_SEC = 7200   # Minimal ushlab turish nazorati (2-8 soatlik intraday to'lqin)
 TRADE_STALE_WARNING_HOURS = 8
 FLIP_WARN_AFTER_SEC = 180
 FLIP_WARN_REPEAT_SEC = 600
@@ -112,7 +112,7 @@ AI_COOLDOWN_SEC = 20
 CHART_COOLDOWN_SEC = 10
 XM_SPREAD_BUFFER = 0.30
 SNIPER_SKIP_IF_SL_TOO_WIDE = True
-FVG_REQUIRE_UNTESTED = False
+FVG_REQUIRE_UNTESTED = True    # Faqat yangi (test qilinmagan) kuchli zonalardan kirish
 NEWS_RETRY_SEC = 300
 
 DEFAULT_BALANCE_USD = 20.0
@@ -120,24 +120,26 @@ MIN_AUTO_BALANCE_USD = 1.0       # Avto-yangilanganda balans shundan pastga tush
 SEND_AI_EXTRA_MESSAGES = False   # True qilsangiz: signaldan keyin AI sharh va SL dan keyin AI tahlil yuboriladi
 DEFAULT_RISK_PER_TRADE_PCT = 10.0
 MAX_RISK_PER_TRADE_PCT = 25.0
-SNIPER_MIN_SL_POINTS = 5.00   # 1.10$ scalp SL butunlay taqiqlanadi! Minimal SL 5.0$
-SNIPER_MAX_SL_POINTS_SMALL = 9.00
+SNIPER_MIN_SL_POINTS = 3.50      # Minimal Sniper SL: 3.5$
+SNIPER_MAX_SL_POINTS_SMALL = 6.00  # Maksimal Sniper SL: 6.0$ (13$ SL hech qachon bo'lmaydi!)
 
-# ===== INTRADAY SNIPER v20: HTF Trend + SMC Pullback + ATR-Adaptive Day-Trading =====
-RANGE_SNIPER_MODE = True        # Intraday Sniper Mode yoqilgan
-RANGE_LOOKBACK_15M = 96         # 96 ta 15m sham = oxirgi 24 soatlik kunlik diapazon
-RANGE_MIN_WIDTH = 18.0          # Kunlik diapazon minimal kengligi ($)
-RANGE_ENTRY_ZONE_PCT = 0.85     # LONG: 10%-85% diapazonda (cho'qqida olmaslik) | SHORT: 15%-90% da
+# ===== TRUE SNIPER DAY-TRADING SOZLAMALARI =====
+RANGE_SNIPER_MODE = False        # ATR shishiradigan eski rejim o'chirildi, aniq strukturaviy SL/TP ishlaydi
+RANGE_LOOKBACK_15M = 96          # 96 ta 15m sham = oxirgi 24 soatlik kunlik diapazon
+RANGE_MIN_WIDTH = 18.0           # Kunlik diapazon minimal kengligi ($)
+SNIPER_BUY_MAX_POS = 0.38        # BUY faqat 24 soatlik diapazonning pastki 0% - 38% (tubi/Discount) qismida!
+SNIPER_SELL_MIN_POS = 0.62       # SELL faqat 24 soatlik diapazonning yuqori 62% - 100% (cho'qqisi/Premium) qismida!
+RANGE_ENTRY_ZONE_PCT = 0.85
 INTRADAY_POS_MIN_PCT = 0.10
-INTRADAY_SL_ATR_MULT = 2.30     # Strukturali Intraday SL = 2.30 x ATR (shovqinda urib ketmaydi)
-INTRADAY_TP1_ATR_MULT = 0.90    # Intraday TP1 = 0.90 x ATR (50% foyda qulflanib, SL BE+ ga o'tadi)
-INTRADAY_TP2_ATR_MULT = 3.60    # Intraday TP2 = 3.60 x ATR (asosiy kunlik sessiya maqsadi)
-RANGE_SL_BUFFER = 0.55
-RANGE_SL_MIN = 6.0              # Minimal Intraday SL ($)
-RANGE_SL_MAX = 45.0             # Oltin 3000$-5000$ bo'lganda ham ATR ga mos ishlaydi
-RANGE_TP_MIN = 12.0
-RANGE_TP_MAX = 95.0
-RANGE_MIN_RR = 1.5
+INTRADAY_SL_ATR_MULT = 1.20
+INTRADAY_TP1_ATR_MULT = 3.50
+INTRADAY_TP2_ATR_MULT = 3.50
+RANGE_SL_BUFFER = 0.35
+RANGE_SL_MIN = 3.5
+RANGE_SL_MAX = 6.0
+RANGE_TP_MIN = 12.5
+RANGE_TP_MAX = 35.0
+RANGE_MIN_RR = 3.5
 
 XM_MIN_LOT = 0.01
 XM_OZ_PER_MIN_LOT = 1.0
@@ -961,16 +963,11 @@ def result_txt(result):
     return _RESULT_TXT.get(result, str(result))
 
 def calc_trade_pnl(trade, price, lot):
-    """Intraday bitimning yopilish narxidagi foyda/zarari (50% TP1 + 50% Runner) (USD) va R."""
+    """0.01 lot uchun yagona TP bo'yicha sof foyda/zarar (USD) va R."""
     init_sl = trade.get("initial_sl", trade["sl"])
     entry = trade["entry"]
     is_long = trade["signal"] == "LONG"
-    raw_pts = (price - entry) if is_long else (entry - price)
-    if trade.get("tp1_notified") and trade.get("tp1"):
-        tp1_pts = abs(trade["tp1"] - entry)
-        pnl_pts = 0.5 * tp1_pts + 0.5 * raw_pts
-    else:
-        pnl_pts = raw_pts
+    pnl_pts = (price - entry) if is_long else (entry - price)
     pnl_usd = round((lot / XM_MIN_LOT) * pnl_pts * XM_OZ_PER_MIN_LOT, 2)
     r_mult = pnl_pts / max(abs(entry - init_sl), 0.01)
     return pnl_usd, r_mult
@@ -2507,18 +2504,26 @@ def _range_sniper_plan(cl15, bias, entry):
         return round(entry + sl_dist, 2), round(entry - tp2_dist, 2), round(entry - tp1_dist, 2)
     return None
 
-def build_sniper_trade(cl15, cl5, struct15, price, atr15, balance, target_bias=None, setup_model="MTF Trend Sniper"):
+def build_sniper_trade(cl15, cl5, struct15, price, atr15, balance, target_bias=None, setup_model="Day-Trading Sniper"):
     bias = target_bias or struct15["bias"]
     if bias not in ("bullish", "bearish"):
         return None
+
+    # 1) QAT'IY PREMIUM / DISCOUNT (ENG UCHIDAN KIRISH) FILTRI:
+    eq15 = struct15.get("eq")
+    if eq15:
+        if bias == "bullish" and price > eq15:
+            return None  # O'rtadan yoki tepadan BUY ochish taqiqlanadi!
+        if bias == "bearish" and price < eq15:
+            return None  # O'rtadan yoki pastdan (3906 kabi) SELL ochish taqiqlanadi!
+
     zones_15m = [z for z in get_active_zones(cl15, "XAU_15m") if z["type"] == bias]
     zones_5m = [z for z in get_active_zones(cl5, "XAU_5m") if z["type"] == bias]
     zones_bias = zones_15m + zones_5m
     if not zones_bias:
         return None
 
-    dyn_tol = max(ZONE_TOL_MAX_POINTS, (atr15 * 0.85) if atr15 else ZONE_TOL_MAX_POINTS)
-    tol = min(price * (ZONE_MAX_DISTANCE_PCT / 100.0), dyn_tol)
+    tol = min(price * (ZONE_MAX_DISTANCE_PCT / 100.0), ZONE_TOL_MAX_POINTS)
     candidates = []
     for z in zones_bias:
         lo, hi = min(z["bottom"], z["top"]), max(z["bottom"], z["top"])
@@ -2527,12 +2532,20 @@ def build_sniper_trade(cl15, cl5, struct15, price, atr15, balance, target_bias=N
     if not candidates:
         return None
 
-    # Ustuvorlik: IFVG / AC_OB / FU va narxga eng yaqin CE
-    kind_priority = {"IFVG": 0, "AC_OB": 0, "FU": 0, "BB": 1, "OB": 1, "FVG": 2}
+    # Ustuvorlik: FU / AC_OB / IFVG va narxga eng yaqin CE
+    kind_priority = {"FU": 0, "AC_OB": 0, "IFVG": 0, "OB": 1, "BB": 1, "FVG": 2}
     candidates.sort(key=lambda z: (kind_priority.get(z["kind"], 3), abs(price - z["ce"])))
     zone = candidates[0]
     zone_lo = min(zone["bottom"], zone["top"])
     zone_hi = max(zone["bottom"], zone["top"])
+
+    # 2) ZERO-DRAWDOWN REJECTION SHARTI: Oxirgi 5m sham zonadan o'z yo'nalishiga qarab yopilgan bo'lishi shart
+    if len(cl5) >= 2:
+        last5 = cl5[-1]
+        if bias == "bullish" and last5[C] <= last5[O]:
+            return None  # BUY uchun 5m sham yashil (o'suvchi) bo'lib yopilishi shart
+        if bias == "bearish" and last5[C] >= last5[O]:
+            return None  # SELL uchun 5m sham qizil (tushuvchi) bo'lib yopilishi shart
 
     confluence = any(
         other is not zone
@@ -2542,51 +2555,50 @@ def build_sniper_trade(cl15, cl5, struct15, price, atr15, balance, target_bias=N
         for other in zones_bias
     )
 
-    is_small_acc = (balance or DEFAULT_BALANCE_USD) <= 60.0
-    atr_cap = max(SNIPER_MAX_SL_POINTS_SMALL, round((atr15 or 3.0) * 1.45, 2))
-    max_sl_pts = min(6.50, atr_cap) if is_small_acc else max(7.50, (atr15 * 2.5 if atr15 else 7.5))
-    min_sl_pts = SNIPER_MIN_SL_POINTS
-
+    max_sl_pts = SNIPER_MAX_SL_POINTS_SMALL  # Maksimum 6.0$ SL
+    min_sl_pts = SNIPER_MIN_SL_POINTS        # Minimum 3.5$ SL
     entry = round(price, 2)
-    range_plan = None
-    if RANGE_SNIPER_MODE:
-        range_plan = _range_sniper_plan(cl15, bias, entry)
-        if not range_plan:
-            return None
-    direction = 1 if bias == "bullish" else -1
-    tp1_level = None
-    if range_plan:
-        sl, tp_final, tp1_level = range_plan
-        risk = abs(entry - sl)
+
+    recent_5m_low = min(c[L] for c in cl5[-3:]) if len(cl5) >= 3 else zone_lo
+    recent_5m_high = max(c[H] for c in cl5[-3:]) if len(cl5) >= 3 else zone_hi
+
+    if bias == "bullish":
+        structural_sl = min(zone_lo - 0.20, recent_5m_low - 0.15) - XM_SPREAD_BUFFER
+        raw_risk = entry - structural_sl
+        if raw_risk > max_sl_pts:
+            tight_sl = min(zone["ce"] - 0.50, recent_5m_low - 0.20) - XM_SPREAD_BUFFER
+            if min_sl_pts <= (entry - tight_sl) <= max_sl_pts:
+                raw_risk = entry - tight_sl
     else:
-        recent_5m_low = min(c[L] for c in cl5[-3:]) if len(cl5) >= 3 else zone_lo
-        recent_5m_high = max(c[H] for c in cl5[-3:]) if len(cl5) >= 3 else zone_hi
+        structural_sl = max(zone_hi + 0.20, recent_5m_high + 0.15) + XM_SPREAD_BUFFER
+        raw_risk = structural_sl - entry
+        if raw_risk > max_sl_pts:
+            tight_sl = max(zone["ce"] + 0.50, recent_5m_high + 0.20) + XM_SPREAD_BUFFER
+            if min_sl_pts <= (tight_sl - entry) <= max_sl_pts:
+                raw_risk = tight_sl - entry
 
-        if bias == "bullish":
-            structural_sl = min(zone_lo - 0.25, recent_5m_low - 0.20) - XM_SPREAD_BUFFER
-            raw_risk = entry - structural_sl
-            if raw_risk > max_sl_pts:
-                # Katta zonada CE / 5m candle low asosida tight sniper SL
-                tight_sl = min(zone["ce"] - 0.65, cl5[-1][L] - 0.35) - XM_SPREAD_BUFFER
-                if 0 < (entry - tight_sl) <= max_sl_pts:
-                    raw_risk = entry - tight_sl
-        else:
-            structural_sl = max(zone_hi + 0.25, recent_5m_high + 0.20) + XM_SPREAD_BUFFER
-            raw_risk = structural_sl - entry
-            if raw_risk > max_sl_pts:
-                tight_sl = max(zone["ce"] + 0.65, cl5[-1][H] + 0.35) + XM_SPREAD_BUFFER
-                if 0 < (tight_sl - entry) <= max_sl_pts:
-                    raw_risk = tight_sl - entry
+    if raw_risk <= 0 or (raw_risk > max_sl_pts and SNIPER_SKIP_IF_SL_TOO_WIDE):
+        return None
 
-        if raw_risk <= 0:
-            return None
-        if raw_risk > max_sl_pts and SNIPER_SKIP_IF_SL_TOO_WIDE:
-            return None
+    risk = round(min(max(raw_risk, min_sl_pts), max_sl_pts), 2)
+    direction = 1 if bias == "bullish" else -1
+    sl = round(entry - direction * risk, 2)
 
-        risk = min(max(raw_risk, min_sl_pts), max_sl_pts)
-        direction = 1 if bias == "bullish" else -1
-        sl = round(entry - direction * risk, 2)
-        tp_final = round(entry + direction * risk * RR1, 2)
+    # 3) YAGONA KATTA DAY-TRADING TP (Kamida 1:3.5 RR yoki kunlik cho'qqi/tubgacha)
+    win_96 = cl15[-RANGE_LOOKBACK_15M:] if len(cl15) >= 30 else cl15
+    hh_96 = max(c[H] for c in win_96)
+    ll_96 = min(c[L] for c in win_96)
+    min_tp_dist = round(risk * RR1, 2)  # Kamida 3.5R (masalan 5$ SL bo'lsa, 17.5$ TP)
+
+    if bias == "bullish":
+        struct_target = max(hh_96 - entry, min_tp_dist)
+        tp_dist = min(max(struct_target, min_tp_dist), risk * 5.0)
+    else:
+        struct_target = max(entry - ll_96, min_tp_dist)
+        tp_dist = min(max(struct_target, min_tp_dist), risk * 5.0)
+
+    tp_final = round(entry + direction * tp_dist, 2)
+
     return {
         "signal": "LONG" if bias == "bullish" else "SHORT",
         "bias": bias,
@@ -2595,12 +2607,12 @@ def build_sniper_trade(cl15, cl5, struct15, price, atr15, balance, target_bias=N
         "zone_top": round(zone_hi, 2),
         "zone_bottom": round(zone_lo, 2),
         "entry": entry, "sl": sl, "initial_sl": sl,
-        "tp1": tp1_level or tp_final, "tp2": tp_final, "tp3": tp_final,
+        "tp1": tp_final, "tp2": tp_final, "tp3": tp_final,  # Yagona TP!
         "rr": round(abs(tp_final - entry) / max(risk, 0.01), 2),
         "confluence": confluence,
         "algo_candle": zone.get("algo_candle", False),
         "has_idm": zone.get("has_idm", False),
-        "sniper_mode": is_small_acc,
+        "sniper_mode": True,
         "opened_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
         "breakeven": False, "tp1_notified": False, "tp2_notified": False, "stale_warned": False,
     }
@@ -2885,11 +2897,9 @@ async def monitor_trade(session, price, bias15):
         side = trade["signal"]
         is_long = side == "LONG"
         entry = trade["entry"]
-        tp1_lvl = trade.get("tp1", entry)
-        tp2_lvl = trade.get("tp2", tp1_lvl)
+        tp_lvl = trade.get("tp1", entry)  # Yagona asosiy TP
         init_sl = trade.get("initial_sl", trade["sl"])
         risk_pts = max(abs(entry - init_sl), 0.01)
-        tp1_dist = max(abs(tp1_lvl - entry), 4.50)
         notes = []
         to_close = None
 
@@ -2905,44 +2915,42 @@ async def monitor_trade(session, price, bias15):
                 age_h = (datetime.datetime.now(datetime.timezone.utc) - opened).total_seconds() / 3600.0
                 if age_h >= TRADE_STALE_WARNING_HOURS:
                     trade["stale_warned"] = True
-                    notes.append(f"⏳ {side_txt(side)} Intraday bitim {age_h:.0f} soatdan beri ochiq.")
+                    notes.append(f"⏳ {side_txt(side)} Day-Trading bitim {age_h:.0f} soatdan beri ochiq.")
             except Exception:
                 trade["stale_warned"] = True
 
-        # 1) Intraday TP1 (0.90 x ATR): 50% foyda qulflanadi va SL Breakeven+ ga suriladi
-        if reached(tp1_lvl) and not trade.get("tp1_notified"):
-            trade["tp1_notified"] = True
+        # 1) Narx +1.5R foydaga o'tganda SL ni Breakeven (+1.0$) ga himoyalash
+        be_trigger = round(entry + risk_pts * 1.5, 2) if is_long else round(entry - risk_pts * 1.5, 2)
+        if reached(be_trigger) and not trade.get("breakeven"):
             trade["breakeven"] = True
-            be_lock = round(max(1.20, tp1_dist * 0.25), 2)
-            new_sl = round(entry + be_lock, 2) if is_long else round(entry - be_lock, 2)
+            new_sl = round(entry + 1.0, 2) if is_long else round(entry - 1.0, 2)
             if better_sl(new_sl, trade["sl"]):
                 trade["sl"] = new_sl
             notes.append(
-                f"✅ {side_txt(side)}: Intraday TP1 (<code>{tp1_lvl}</code>) olindi! "
-                f"SL foydaga qulflandi → <code>{trade['sl']}</code> (Asosiy maqsad TP2: <code>{tp2_lvl}</code>)"
+                f"🛡 {side_txt(side)} +1.5R foydada! SL bezubitokka olindi → <code>{trade['sl']}</code> (TP: <code>{tp_lvl}</code>)"
             )
 
-        # 2) Intraday Runner Trailing: 1.8 x TP1 masofaga yetganda SL +1.15 x TP1 foydaga ko'tariladi
-        trail_start = round(entry + tp1_dist * 1.80, 2) if is_long else round(entry - tp1_dist * 1.80, 2)
-        if trade.get("tp1_notified") and reached(trail_start):
-            trail_sl = round(entry + tp1_dist * 1.15, 2) if is_long else round(entry - tp1_dist * 1.15, 2)
-            if better_sl(trail_sl, trade["sl"]) and abs(trail_sl - trade["sl"]) > 0.50:
+        # 2) Narx +2.5R foydaga o'tganda +1.2R foydani qulflash (Trailing)
+        trail_trigger = round(entry + risk_pts * 2.5, 2) if is_long else round(entry - risk_pts * 2.5, 2)
+        if reached(trail_trigger) and not trade.get("tp1_notified"):
+            trade["tp1_notified"] = True
+            trail_sl = round(entry + risk_pts * 1.2, 2) if is_long else round(entry - risk_pts * 1.2, 2)
+            if better_sl(trail_sl, trade["sl"]):
                 trade["sl"] = trail_sl
-                last_noted = trade.get("last_trail_note_sl")
-                if last_noted is None or abs(trail_sl - last_noted) >= 1.5:
-                    trade["last_trail_note_sl"] = trail_sl
-                    notes.append(f"🔥 {side_txt(side)}: Intraday Trailing SL ko'tarildi → <code>{trade['sl']}</code>")
+                notes.append(f"🔥 {side_txt(side)}: Foyda qulflandi (+1.2R) → SL: <code>{trade['sl']}</code>")
 
-        # 3) Asosiy Intraday TP2 yoki SL tekshiruvi
+        # 3) Asosiy TP yoki SL tekshiruvi
         sl_hit = (is_long and price <= trade["sl"]) or ((not is_long) and price >= trade["sl"])
-        tp2_hit = reached(tp2_lvl)
+        tp_hit = reached(tp_lvl)
 
-        if tp2_hit:
-            to_close = ("TP2", tp2_lvl)
+        if tp_hit:
+            to_close = ("TP2", tp_lvl)
         elif sl_hit:
             sl_price = trade["sl"]
             if trade.get("tp1_notified"):
                 label = "TP1 + Trailing SL"
+            elif trade.get("breakeven"):
+                label = "BE+"
             else:
                 label = "SL"
             to_close = (label, sl_price)
@@ -3101,18 +3109,20 @@ async def analyze_gold_market(session, run_deep_scoring=True):
         has_bear_liq_raid = bool(sweeps.get("bear_sweep") or sweep15 == "bearish_sweep" or sweep5 == "bearish_sweep")
 
         delta15_pre = order_flow_delta(cl15, 12)
-        htf_bull = (b15 == "bullish") and (b1h == "bullish" or b4h == "bullish" or b1d == "bullish")
-        htf_bear = (b15 == "bearish") and (b1h == "bearish" or b4h == "bearish" or b1d == "bearish")
-        vwap_bull = (vwap15 is None) or (price >= vwap15)
-        vwap_bear = (vwap15 is None) or (price <= vwap15)
+        delta5_pre = order_flow_delta(cl5, 6)
+        eq15_val = struct15.get("eq")
 
-        # Intraday Day-Trading Sniper: HTF trend + SMC Pullback + VWAP + OrderFlow Delta uyg'unligi
-        if htf_bull and vwap_bull and delta15_pre >= 0 and (INTRADAY_POS_MIN_PCT <= pos_96 <= RANGE_ENTRY_ZONE_PCT):
-            if b5 == "bullish" or has_bull_liq_raid:
-                setup_trials.append(("bullish", "Intraday Trend Pullback Sniper (BUY)"))
-        elif htf_bear and vwap_bear and delta15_pre <= 0 and ((1.0 - RANGE_ENTRY_ZONE_PCT) <= pos_96 <= (1.0 - INTRADAY_POS_MIN_PCT)):
-            if b5 == "bearish" or has_bear_liq_raid:
-                setup_trials.append(("bearish", "Intraday Trend Pullback Sniper (SELL)"))
+        # 1) ENG PASTIDAN (TUBIDAN) SNIPER BUY:
+        # Narx Discount'da (pos_96 <= 38% va EQ dan pastda) + Likvidlik supurilgan yoki 5m CHoCH bo'lgan
+        if pos_96 <= SNIPER_BUY_MAX_POS and (not eq15_val or price <= eq15_val):
+            if (has_bull_liq_raid or b15 == "bullish") and (b5 == "bullish" or delta5_pre > 0):
+                setup_trials.append(("bullish", "Sniper Bottom Entry (BUY)"))
+
+        # 2) ENG UCHIDAN (CHO'QQISIDAN) SNIPER SELL:
+        # Narx Premium'da (pos_96 >= 62% va EQ dan tepada) + Likvidlik supurilgan yoki 5m CHoCH bo'lgan
+        if pos_96 >= SNIPER_SELL_MIN_POS and (not eq15_val or price >= eq15_val):
+            if (has_bear_liq_raid or b15 == "bearish") and (b5 == "bearish" or delta5_pre < 0):
+                setup_trials.append(("bearish", "Sniper Top Entry (SELL)"))
 
         for trial_bias, model_name in setup_trials:
             cand_try = build_sniper_trade(
