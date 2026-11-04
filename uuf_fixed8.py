@@ -1013,7 +1013,7 @@ async def apply_pnl_to_balance(pnl_usd):
     return new_bal
 
 def _is_win_result(r):
-    return r in ("TP (2.0R)", "TP1", "TP2", "TP3", "TP1 + Trailing SL", "TP2 + Trailing SL")
+    return r in ("TP (2.0R)", "TP1", "TP2", "TP3")
 
 async def win_rate_text():
     results = await db.get_all_results()
@@ -1177,34 +1177,49 @@ async def get_learned_adjustments(current_confs):
             "SELECT result, confirmations FROM trades WHERE confirmations IS NOT NULL ORDER BY id DESC LIMIT 60"
         ) as cur:
             rows = await cur.fetchall()
-    if len(rows) < 5:
+    if len(rows) < 1:
         return 0, []
-
     stats = {}
     for res, conf_str in rows:
-        is_win = _is_win_result(res)
+        is_tp = _is_win_result(res)
+        is_be = res in ("BE+", "BE", "TP1 + Trailing SL", "TP2 + Trailing SL")
         is_loss = (res == "SL")
-        if not (is_win or is_loss):
-            continue
         for tag in (conf_str or "").split(", "):
             tag = tag.strip()
             if not tag or "Xotira:" in tag:
                 continue
-            w, l = stats.get(tag, (0, 0))
-            stats[tag] = (w + (1 if is_win else 0), l + (1 if is_loss else 0))
-
+            w, l, b = stats.get(tag, (0, 0, 0))
+            stats[tag] = (
+                w + (1 if is_tp else 0),
+                l + (1 if is_loss else 0),
+                b + (1 if is_be else 0),
+            )
     adj, notes = 0, []
+    # 1) Oxirgi bitim natijasiga qarab darhol moslashish (1-bitimdanoq ishlaydi)
+    last_res, _ = rows[0]
+    if last_res == "SL":
+        adj -= 4
+        notes.append("🧠Moslashuv: Oxirgi bitim SL (-4 filtr)")
+    elif last_res in ("BE+", "BE", "TP1 + Trailing SL"):
+        adj -= 2
+        notes.append("🧠Moslashuv: Oxirgi bitim TP ga yetmay BE bo'ldi (aniqroq kirish -2)")
+    elif _is_win_result(last_res):
+        adj += 3
+        notes.append("🧠Moslashuv: Oxirgi bitim to'liq TP (+3)")
+    # 2) Har bir tasdiq (confirmation) bo'yicha 1-bitimdan boshlab xotira tahlili
     for c in list(current_confs):
-        w, l = stats.get(c, (0, 0))
-        total = w + l
-        if total >= 4:
-            wr = w / total
-            if wr <= 0.35:
-                adj -= 6
-                notes.append(f"🧠Xotira: {c} ko'p SL (-6)")
-            elif wr >= 0.70:
-                adj += 5
-                notes.append(f"🧠Xotira: {c} yuqori WR (+5)")
+        w, l, b = stats.get(c, (0, 0, 0))
+        total = w + l + b
+        if total >= 1:
+            if l > w and l >= 1:
+                adj -= 4
+                notes.append(f"🧠Xotira: {c} SL bergan (-4)")
+            elif b > w and w == 0:
+                adj -= 2
+                notes.append(f"🧠Xotira: {c} faqat BE bergan (-2)")
+            elif w > l:
+                adj += 4
+                notes.append(f"🧠Xotira: {c} TP bergan (+4)")
     return max(-15, min(15, adj)), notes
 
 # ==================== PURE-PYTHON PNG CHART RENDERER ====================
@@ -2919,25 +2934,26 @@ async def monitor_trade(session, price, bias15):
             except Exception:
                 trade["stale_warned"] = True
 
-        # 1) Narx +1.5R foydaga o'tganda SL ni Breakeven (+1.0$) ga himoyalash
-        be_trigger = round(entry + risk_pts * 1.5, 2) if is_long else round(entry - risk_pts * 1.5, 2)
+        # 1) Narx +2.5R ga chiqqanda SL ni kirishdan tepaga EMAS, -0.4R pastga (retestdan xavfsiz joyga) tortish
+        be_trigger = round(entry + risk_pts * 2.5, 2) if is_long else round(entry - risk_pts * 2.5, 2)
         if reached(be_trigger) and not trade.get("breakeven"):
             trade["breakeven"] = True
-            new_sl = round(entry + 1.0, 2) if is_long else round(entry - 1.0, 2)
+            # Retestda urib ketmasligi uchun kirishdan 0.4R orqada qoladi
+            new_sl = round(entry - risk_pts * 0.4, 2) if is_long else round(entry + risk_pts * 0.4, 2)
             if better_sl(new_sl, trade["sl"]):
                 trade["sl"] = new_sl
-            notes.append(
-                f"🛡 {side_txt(side)} +1.5R foydada! SL bezubitokka olindi → <code>{trade['sl']}</code> (TP: <code>{tp_lvl}</code>)"
-            )
+                notes.append(
+                    f"🛡 {side_txt(side)} +2.5R foydada! Risk qisqartirildi (Retest uchun bo'shliq qoldirildi) → SL: <code>{trade['sl']}</code>"
+                )
 
-        # 2) Narx +2.5R foydaga o'tganda +1.2R foydani qulflash (Trailing)
-        trail_trigger = round(entry + risk_pts * 2.5, 2) if is_long else round(entry - risk_pts * 2.5, 2)
+        # 2) Faqat +3.8R (TP ga juda yaqin qolganda) haqiqiy bezubitokka (+0.5$) olish
+        trail_trigger = round(entry + risk_pts * 3.8, 2) if is_long else round(entry - risk_pts * 3.8, 2)
         if reached(trail_trigger) and not trade.get("tp1_notified"):
             trade["tp1_notified"] = True
-            trail_sl = round(entry + risk_pts * 1.2, 2) if is_long else round(entry - risk_pts * 1.2, 2)
+            trail_sl = round(entry + 0.5, 2) if is_long else round(entry - 0.5, 2)
             if better_sl(trail_sl, trade["sl"]):
                 trade["sl"] = trail_sl
-                notes.append(f"🔥 {side_txt(side)}: Foyda qulflandi (+1.2R) → SL: <code>{trade['sl']}</code>")
+                notes.append(f"🔥 {side_txt(side)} +3.8R! SL bezubitokka olindi → SL: <code>{trade['sl']}</code> (TP: <code>{tp_lvl}</code>)")
 
         # 3) Asosiy TP yoki SL tekshiruvi
         sl_hit = (is_long and price <= trade["sl"]) or ((not is_long) and price >= trade["sl"])
