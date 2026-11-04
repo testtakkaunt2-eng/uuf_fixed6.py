@@ -93,16 +93,16 @@ BYBIT_WS_URL = os.environ.get("BYBIT_WS_URL", "wss://stream.bybit.com/v5/public/
 LIMIT = 240
 HTF_LIMIT = 120
 
-RR1, RR2, RR3 = 3.0, 3.0, 3.0  # Argon High: Qat'iy 1:3 RR matematik ustunligi
+RR1, RR2, RR3 = 3.5, 3.5, 3.5
 SWING_LEFT, SWING_RIGHT = 3, 3
 CHECK_INTERVAL_SEC = 5
-ZONE_MAX_DISTANCE_PCT = 0.10   # Faqat zonaning ichidan/uchidan kirish (0.16 dan qisqartirildi)
-ZONE_TOL_MAX_POINTS = 2.0      # Zonadan uzoqlashib ketgan narxga kirmaydi
-MIN_SIGNAL_SCORE = 75          # Faqat eng kuchli A/A+ Sniper signallar (20$ hisob uchun juda muhim!)
-DAILY_TARGET_SIGNALS_MIN = 1   # Kuniga 1-3 ta haqiqiy Day-Trading bitim (scalp emas!)
-DAILY_TARGET_SIGNALS_MAX = 3
-SIGNAL_COOLDOWN_SEC = 14400    # Signallar orasida kamida 4 soat (14400s) - Overtrading himoyasi
-INTRADAY_MIN_HOLD_SEC = 7200   # Minimal ushlab turish nazorati (2-8 soatlik intraday to'lqin)
+ZONE_MAX_DISTANCE_PCT = 0.05   # Faqat aniq zona ichidan kirish
+ZONE_TOL_MAX_POINTS = 0.70     # 0.70$ aniqlikda Sniper kirish (erta kirmaydi)
+MIN_SIGNAL_SCORE = 76          # Real hisob uchun faqat A/A+ (Sweep + CHoCH + SMT)
+DAILY_TARGET_SIGNALS_MIN = 1   # Kuniga 1-2 ta eng sifatli bitim yetarli
+DAILY_TARGET_SIGNALS_MAX = 2
+SIGNAL_COOLDOWN_SEC = 14400
+INTRADAY_MIN_HOLD_SEC = 7200
 TRADE_STALE_WARNING_HOURS = 8
 FLIP_WARN_AFTER_SEC = 180
 FLIP_WARN_REPEAT_SEC = 600
@@ -110,49 +110,51 @@ LIVE_PRICE_MAX_AGE_SEC = 10
 ASIA_END_HOUR_UTC = 6
 AI_COOLDOWN_SEC = 20
 CHART_COOLDOWN_SEC = 10
-XM_SPREAD_BUFFER = 0.30
-SNIPER_SKIP_IF_SL_TOO_WIDE = True # SL chegaradan (5.0$) oshib ketsa bitim ochmaydi - qat'iy himoya!
-FVG_REQUIRE_UNTESTED = True    # Faqat yangi (test qilinmagan) kuchli zonalardan kirish
+XM_SPREAD_BUFFER = 0.25        # Exness/XM spred buferi
+SNIPER_SKIP_IF_SL_TOO_WIDE = True
+FVG_REQUIRE_UNTESTED = True
 NEWS_RETRY_SEC = 300
 
 DEFAULT_BALANCE_USD = 20.0
 MIN_AUTO_BALANCE_USD = 1.0
 SEND_AI_EXTRA_MESSAGES = False
-DEFAULT_RISK_PER_TRADE_PCT = 20.0    # 20$ ning 20% i = 4.0$ zarar ruxsati (0.01 lot uchun ideal)
-MAX_RISK_PER_TRADE_PCT = 30.0        # Zarur paytda SL 5.0$ gacha kengayishi uchun ruxsat
-SNIPER_MIN_SL_POINTS = 3.00          # Tepada sozlaganimiz bilan bir xil (Minimal 3.0$)
-SNIPER_MAX_SL_POINTS_SMALL = 5.00    # Tepada sozlaganimiz bilan bir xil (Maksimal 5.0$)
+DEFAULT_RISK_PER_TRADE_PCT = 15.0  # 20$ ning 15% = 3.0$ (0.01 lotga mos)
+MAX_RISK_PER_TRADE_PCT = 22.0
+SNIPER_MIN_SL_POINTS = 3.00        # Minimal Sniper SL: 3.0$ (spred shovqinidan himoyalangan)
+SNIPER_MAX_SL_POINTS_SMALL = 4.20  # Maksimal Sniper SL: 4.2$ (20$ hisobda 5 ta imkoniyat)
 
 # ===== TRUE SNIPER DAY-TRADING SOZLAMALARI =====
-RANGE_SNIPER_MODE = False        # ATR shishiradigan eski rejim o'chirildi, aniq strukturaviy SL/TP ishlaydi
-RANGE_LOOKBACK_15M = 96          # 96 ta 15m sham = oxirgi 24 soatlik kunlik diapazon
-RANGE_MIN_WIDTH = 18.0           # Kunlik diapazon minimal kengligi ($)
-SNIPER_BUY_MAX_POS = 0.38        # BUY faqat 24 soatlik diapazonning pastki 0% - 38% (tubi/Discount) qismida!
-SNIPER_SELL_MIN_POS = 0.62       # SELL faqat 24 soatlik diapazonning yuqori 62% - 100% (cho'qqisi/Premium) qismida!
+RANGE_SNIPER_MODE = False
+RANGE_LOOKBACK_15M = 96
+RANGE_MIN_WIDTH = 18.0
+SNIPER_BUY_MAX_POS = 0.35          # 24 soatlik diapazonning pastki 35% qismidan BUY
+SNIPER_SELL_MIN_POS = 0.65         # 24 soatlik diapazonning yuqori 65% qismidan SELL
 RANGE_ENTRY_ZONE_PCT = 0.85
-INTRADAY_POS_MIN_PCT = 0.15      # Kirish faqat kunlik diapazonning chetki 15% qismida ruxsat etiladi
-INTRADAY_SL_ATR_MULT = 1.00      # Zarar riski qat'iy 1.0 ATR ga tushiriladi (toraytilgan SL)
-INTRADAY_TP1_ATR_MULT = 3.00     # Birinchi foyda 3.0 ATR ga suriladi (qat'iy 1:3 RR)
-INTRADAY_TP2_ATR_MULT = 5.50     # Asosiy trendni to'liq ushlash uchun TP2 kengaytiriladi
-RANGE_SL_BUFFER = 0.25           # SL zonaga qattiq yopishishi uchun bufer qisqartiriladi
-RANGE_SL_MIN = 3.0               # Eng kichik SL 3.0$ gacha tushiriladi (20$ lik hisob uchun xavfsiz)
-RANGE_SL_MAX = 5.0               # Maksimal SL 5.0$ dan oshmaydi (Hisobning max 25% riski)
-RANGE_TP_MIN = 15.0              # Kichik shovqinda foyda olinmaydi, minimal maqsad 15.0$
-RANGE_TP_MAX = 45.0              # Trendli kunlarda maksimal harakat potensiali 45.0$
-RANGE_MIN_RR = 3.0               # Matematik ustunlikni saqlash uchun minimal 1:3 RR
+INTRADAY_POS_MIN_PCT = 0.10
+INTRADAY_SL_ATR_MULT = 1.20
+INTRADAY_TP1_ATR_MULT = 3.50
+INTRADAY_TP2_ATR_MULT = 3.50
+RANGE_SL_BUFFER = 0.25
+RANGE_SL_MIN = 3.0
+RANGE_SL_MAX = 4.2
+RANGE_TP_MIN = 10.0
+RANGE_TP_MAX = 30.0
+RANGE_MIN_RR = 3.5
 
 XM_MIN_LOT = 0.01
 XM_OZ_PER_MIN_LOT = 1.0
 
 # Exness sozlamalari (1 ta foydalanuvchiga maksimal 3 ta hisob)
 MAX_EXNESS_ACCOUNTS = 3
-EXNESS_DEFAULT_SERVER = os.environ.get("EXNESS_DEFAULT_SERVER", "Exness-MT5Trial9")
+EXNESS_DEFAULT_SERVER = os.environ.get("EXNESS_DEFAULT_SERVER", "Exness-MT5Real")
 EXNESS_GOLD_SYMBOLS = ("XAUUSDm", "XAUUSD", "XAUUSDc", "GOLDm", "GOLD")
 EXNESS_FALLBACK_SERVERS = (
-    "Exness-MT5Trial9", "Exness-MT5Trial8", "Exness-MT5Trial10",
-    "Exness-MT5Trial7", "Exness-MT5Trial6", "Exness-MT5Trial11",
-    "Exness-MT5Trial12", "Exness-MT5Trial5", "Exness-MT5Trial",
     "Exness-MT5Real", "Exness-MT5Real9", "Exness-MT5Real8",
+    "Exness-MT5Real7", "Exness-MT5Real6", "Exness-MT5Real10",
+    "Exness-MT5Real11", "Exness-MT5Real12", "Exness-MT5Real5",
+    "Exness-MT5Real4", "Exness-MT5Real3", "Exness-MT5Real2",
+    "Exness-MT5Trial9", "Exness-MT5Trial8", "Exness-MT5Trial10",
+    "Exness-MT5Trial7", "Exness-MT5Trial6", "Exness-MT5Trial",
 )
 MT5_TERMINAL_PATH = os.environ.get("MT5_TERMINAL_PATH", "").strip()
 
@@ -2934,26 +2936,25 @@ async def monitor_trade(session, price, bias15):
             except Exception:
                 trade["stale_warned"] = True
 
-        # 1) Narx +2.5R ga chiqqanda SL ni kirishdan tepaga EMAS, -0.4R pastga (retestdan xavfsiz joyga) tortish
-        be_trigger = round(entry + risk_pts * 2.5, 2) if is_long else round(entry - risk_pts * 2.5, 2)
+        # 1) +1.5R da haqiqiy Bezubitok (+0.30$ foyda bilan 20$ real hisobni himoyalash)
+        be_trigger = round(entry + risk_pts * 1.5, 2) if is_long else round(entry - risk_pts * 1.5, 2)
         if reached(be_trigger) and not trade.get("breakeven"):
             trade["breakeven"] = True
-            # Retestda urib ketmasligi uchun kirishdan 0.4R orqada qoladi
-            new_sl = round(entry - risk_pts * 0.4, 2) if is_long else round(entry + risk_pts * 0.4, 2)
+            new_sl = round(entry + 0.30, 2) if is_long else round(entry - 0.30, 2)
             if better_sl(new_sl, trade["sl"]):
                 trade["sl"] = new_sl
                 notes.append(
-                    f"🛡 {side_txt(side)} +2.5R foydada! Risk qisqartirildi (Retest uchun bo'shliq qoldirildi) → SL: <code>{trade['sl']}</code>"
+                    f"🛡 {side_txt(side)} +1.5R foydada! SL bezubitokka (+0.30$) olindi → SL: <code>{trade['sl']}</code>"
                 )
 
-        # 2) Faqat +3.8R (TP ga juda yaqin qolganda) haqiqiy bezubitokka (+0.5$) olish
-        trail_trigger = round(entry + risk_pts * 3.8, 2) if is_long else round(entry - risk_pts * 3.8, 2)
+        # 2) +2.5R da foydaning +1.5R qismini qulflash (Trailing SL)
+        trail_trigger = round(entry + risk_pts * 2.5, 2) if is_long else round(entry - risk_pts * 2.5, 2)
         if reached(trail_trigger) and not trade.get("tp1_notified"):
             trade["tp1_notified"] = True
-            trail_sl = round(entry + 0.5, 2) if is_long else round(entry - 0.5, 2)
+            trail_sl = round(entry + risk_pts * 1.5, 2) if is_long else round(entry - risk_pts * 1.5, 2)
             if better_sl(trail_sl, trade["sl"]):
                 trade["sl"] = trail_sl
-                notes.append(f"🔥 {side_txt(side)} +3.8R! SL bezubitokka olindi → SL: <code>{trade['sl']}</code> (TP: <code>{tp_lvl}</code>)")
+                notes.append(f"🔥 {side_txt(side)} +2.5R! +1.5R foyda qulflandi → SL: <code>{trade['sl']}</code> (TP: <code>{tp_lvl}</code>)")
 
         # 3) Asosiy TP yoki SL tekshiruvi
         sl_hit = (is_long and price <= trade["sl"]) or ((not is_long) and price >= trade["sl"])
@@ -3378,7 +3379,7 @@ async def scanner_loop(app):
                 trade is not None
                 and cand is not None
                 and cand.get("signal") != trade.get("signal")
-                and cand.get("score", 0) >= 68
+                and cand.get("score", 0) >= 78
                 and cooldown_ok
             )
             can_open_new = (
