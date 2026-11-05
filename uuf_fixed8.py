@@ -91,7 +91,11 @@ BYBIT_REST_URL = os.environ.get("BYBIT_REST_URL", "https://api.bybit.com").rstri
 BYBIT_WS_URL = os.environ.get("BYBIT_WS_URL", "wss://stream.bybit.com/v5/public/linear")
 
 LIMIT = 240
-HTF_LIMIT = 120
+HTF_LIMIT = 720          # 1H da 720 ta sham = to'liq 1 oylik (30 kun) tarix
+HTF_4H_LIMIT = 180       # 4H da 180 ta sham = to'liq 1 oylik (30 kun) tarix
+HTF_1D_LIMIT = 120       # 1D da 120 ta sham = 4 oylik tarix
+HTF_1W_LIMIT = 24        # 1W da 24 ta sham = 6 oylik haftalik tarix
+HTF_1M_LIMIT = 12        # 1M da 12 ta sham = 1 yillik oylik tarix
 
 RR1, RR2, RR3 = 3.5, 3.5, 3.5
 SWING_LEFT, SWING_RIGHT = 3, 3
@@ -1459,7 +1463,7 @@ async def fetch_raw_price(session):
 
 async def fetch_ohlcv(session, timeframe, symbol=SYMBOL, limit=LIMIT):
     imap = {"1m": "1", "5m": "5", "15m": "15", "30m": "30",
-            "1h": "60", "4h": "240", "1d": "D"}
+            "1h": "60", "4h": "240", "1d": "D", "1w": "W", "1M": "M"}
     interval = imap.get(timeframe, timeframe)
     url = f"{BYBIT_REST_URL}/v5/market/kline"
     params = {"category": "linear", "symbol": symbol,
@@ -1676,7 +1680,7 @@ def detect_equal_highs_lows(candles, cache_key="XAU_15m", tol_pct=0.06):
             eql = round((l1 + l2) / 2.0, 2)
     return eqh, eql
 
-def detect_asia_and_pd_sweeps(candles_15m, pdh, pdl):
+def detect_asia_and_pd_sweeps(candles_15m, pdh, pdl, pwh=None, pwl=None, pmh=None, pml=None):
     asia_high, asia_low = None, None
     ff_high, ff_low = None, None
     daily_open_ny = None
@@ -1714,6 +1718,14 @@ def detect_asia_and_pd_sweeps(candles_15m, pdh, pdl):
     bull_sweeps, bear_sweeps = [], []
 
     for c in recent:
+        if pml and c[L] < pml and c[C] > pml:
+            bull_sweeps.append("PML Sweep (O'tgan oy Low likvidligi olindi)")
+        if pmh and c[H] > pmh and c[C] < pmh:
+            bear_sweeps.append("PMH Sweep (O'tgan oy High likvidligi olindi)")
+        if pwl and c[L] < pwl and c[C] > pwl:
+            bull_sweeps.append("PWL Sweep (O'tgan hafta Low likvidligi olindi)")
+        if pwh and c[H] > pwh and c[C] < pwh:
+            bear_sweeps.append("PWH Sweep (O'tgan hafta High likvidligi olindi)")
         if pdl and c[L] < pdl and c[C] > pdl:
             bull_sweeps.append("PDL Sweep (Kecha Low likvidligi olindi)")
         if pdh and c[H] > pdh and c[C] < pdh:
@@ -1794,7 +1806,7 @@ def detect_fu_candles(candles):
             })
     return fu_zones
 
-def detect_ob_and_breakers(candles):
+def detect_ob_and_breakers(candles, max_age_bars=60):
     """3-dars Body-Only Orderblock + ICT Algo Candle (FVG + Liquidity Grab) + Rejection Block (RB)."""
     bodies = [abs(c[C] - c[O]) for c in candles]
     vols = [c[V] if len(c) > 5 else 0 for c in candles]
@@ -1843,7 +1855,7 @@ def detect_ob_and_breakers(candles):
     zones = []
     for ob in raw_obs:
         fi = ob["index"]
-        if n - 1 - fi > 60:
+        if n - 1 - fi > max_age_bars:
             continue
         broken_idx = None
         check_end = max(fi + 1, n - 2)
@@ -1984,10 +1996,13 @@ def get_active_zones(candles, cache_key="XAU_15m"):
     atr = calculate_atr(candles) or 0.0
     min_size = max(0.22, atr * 0.08)
     untested = FVG_REQUIRE_UNTESTED and cache_key == "XAU_15m"
-    fvgs = [z for z in detect_fvg(candles, min_size) if _fvg_is_fresh(z, candles, untested=untested)]
+    is_htf = cache_key in ("XAU_1h", "XAU_4h", "XAU_1d")
+    fvg_age = 180 if is_htf else 45
+    ob_age = 180 if is_htf else 60
+    fvgs = [z for z in detect_fvg(candles, min_size) if _fvg_is_fresh(z, candles, max_age_bars=fvg_age, untested=untested)]
     ifvgs = detect_ifvg(candles, min_size=min_size)
-    obs_bbs = detect_ob_and_breakers(candles)
-    fus = [z for z in detect_fu_candles(candles) if _fvg_is_fresh(z, candles, max_age_bars=35)]
+    obs_bbs = detect_ob_and_breakers(candles, max_age_bars=ob_age)
+    fus = [z for z in detect_fu_candles(candles) if _fvg_is_fresh(z, candles, max_age_bars=fvg_age if is_htf else 35)]
     all_fresh = fvgs + ifvgs + obs_bbs + fus
     _zones_cache[full_key] = {"ts": ts, "zones": all_fresh}
     return all_fresh
@@ -2125,16 +2140,23 @@ async def fetch_htf_context(session):
     now_ts = time.time()
     cache = await db.state_get(
         "htf_cache",
-        {"b1h": None, "b4h": None, "b1d": None, "pdh": None, "pdl": None, "ts": 0, "offset": None},
+        {
+            "b1h": None, "b4h": None, "b1d": None, "b1w": None, "b1m": None,
+            "pdh": None, "pdl": None, "pwh": None, "pwl": None, "pmh": None, "pml": None,
+            "month_high": None, "month_low": None, "month_eq": None,
+            "htf_zones": [], "ts": 0, "offset": None,
+        },
     )
     age = now_ts - cache.get("ts", 0)
     if 0 <= age < 60 and cache.get("offset") == _CURRENT_OFFSET:
         return cache
 
     tasks = [
-        fetch_ohlcv(session, "1h", limit=HTF_LIMIT),
-        fetch_ohlcv(session, "4h", limit=HTF_LIMIT),
-        fetch_ohlcv(session, "1d", limit=HTF_LIMIT),
+        fetch_ohlcv(session, "1h", limit=HTF_LIMIT),       # 720 ta sham = 30 kun (1 oy)
+        fetch_ohlcv(session, "4h", limit=HTF_4H_LIMIT),    # 180 ta sham = 30 kun (1 oy)
+        fetch_ohlcv(session, "1d", limit=HTF_1D_LIMIT),    # 120 ta sham = 4 oy
+        fetch_ohlcv(session, "1w", limit=HTF_1W_LIMIT),    # 24 hafta
+        fetch_ohlcv(session, "1M", limit=HTF_1M_LIMIT),    # 12 oy
     ]
     results = await asyncio.gather(*tasks, return_exceptions=True)
 
@@ -2147,16 +2169,63 @@ async def fetch_htf_context(session):
     b1h = safe_bias(0, "1h", "b1h")
     b4h = safe_bias(1, "4h", "b4h")
     b1d = safe_bias(2, "1d", "b1d")
+    b1w = safe_bias(3, "1w", "b1w")
+    b1m = safe_bias(4, "1M", "b1m")
 
     c1h = results[0] if not isinstance(results[0], Exception) else None
+    c4h = results[1] if not isinstance(results[1], Exception) else None
     c1d = results[2] if not isinstance(results[2], Exception) else None
+    c1w = results[3] if not isinstance(results[3], Exception) else None
+    c1m = results[4] if not isinstance(results[4], Exception) else None
+
     pdh, pdl = compute_pdh_pdl(c1h, c1d)
     if pdh is None:
         pdh, pdl = cache.get("pdh"), cache.get("pdl")
 
+    # O'tgan hafta High/Low (PWH / PWL)
+    pwh, pwl = cache.get("pwh"), cache.get("pwl")
+    if c1w and len(c1w) >= 2:
+        pwh, pwl = round(c1w[-2][H], 2), round(c1w[-2][L], 2)
+    elif c1d and len(c1d) >= 8:
+        prev_7d = c1d[-8:-1]
+        pwh, pwl = round(max(c[H] for c in prev_7d), 2), round(min(c[L] for c in prev_7d), 2)
+
+    # O'tgan oy High/Low (PMH / PML)
+    pmh, pml = cache.get("pmh"), cache.get("pml")
+    if c1m and len(c1m) >= 2:
+        pmh, pml = round(c1m[-2][H], 2), round(c1m[-2][L], 2)
+
+    # Oxirgi 30 kunlik (1 oylik) Dealing Range (High, Low, 50% Equilibrium)
+    month_high, month_low, month_eq = cache.get("month_high"), cache.get("month_low"), cache.get("month_eq")
+    if c1h and len(c1h) >= 48:
+        cl1h_m = closed_only(c1h)[-720:]
+        month_high = round(max(c[H] for c in cl1h_m), 2)
+        month_low = round(min(c[L] for c in cl1h_m), 2)
+        month_eq = round((month_high + month_low) / 2.0, 2)
+    elif c1d and len(c1d) >= 5:
+        cl1d_m = closed_only(c1d)[-30:]
+        month_high = round(max(c[H] for c in cl1d_m), 2)
+        month_low = round(min(c[L] for c in cl1d_m), 2)
+        month_eq = round((month_high + month_low) / 2.0, 2)
+
+    # 1 oylik 4H va 1D aktiv Order Block / FVG / FU zonalari
+    htf_zones = []
+    if c4h and len(c4h) >= 20:
+        for z in get_active_zones(closed_only(c4h), cache_key="XAU_4h")[-12:]:
+            zc = dict(z)
+            zc["tf"] = "4H"
+            htf_zones.append(zc)
+    if c1d and len(c1d) >= 15:
+        for z in get_active_zones(closed_only(c1d)[-45:], cache_key="XAU_1d")[-8:]:
+            zc = dict(z)
+            zc["tf"] = "1D"
+            htf_zones.append(zc)
+
     data = {
-        "b1h": b1h, "b4h": b4h, "b1d": b1d,
-        "pdh": pdh, "pdl": pdl, "ts": now_ts, "offset": _CURRENT_OFFSET,
+        "b1h": b1h, "b4h": b4h, "b1d": b1d, "b1w": b1w, "b1m": b1m,
+        "pdh": pdh, "pdl": pdl, "pwh": pwh, "pwl": pwl, "pmh": pmh, "pml": pml,
+        "month_high": month_high, "month_low": month_low, "month_eq": month_eq,
+        "htf_zones": htf_zones, "ts": now_ts, "offset": _CURRENT_OFFSET,
     }
     await db.state_set("htf_cache", data)
     return data
@@ -3076,7 +3145,12 @@ async def analyze_gold_market(session, run_deep_scoring=True):
     cl1 = closed_only(c1) if not isinstance(c1, Exception) else []
     htf = await fetch_htf_context(session)
     b1h, b4h, b1d = htf["b1h"], htf["b4h"], htf["b1d"]
+    b1w, b1m = htf.get("b1w"), htf.get("b1m")
     pdh, pdl = htf["pdh"], htf["pdl"]
+    pwh, pwl = htf.get("pwh"), htf.get("pwl")
+    pmh, pml = htf.get("pmh"), htf.get("pml")
+    month_high, month_low, month_eq = htf.get("month_high"), htf.get("month_low"), htf.get("month_eq")
+    htf_zones = htf.get("htf_zones") or []
 
     cl5 = closed_only(c5)
     cl15 = closed_only(c15)
@@ -3093,7 +3167,7 @@ async def analyze_gold_market(session, run_deep_scoring=True):
 
     b5 = struct5["bias"]
     b15 = struct15["bias"]
-    sweeps = detect_asia_and_pd_sweeps(cl15, pdh, pdl)
+    sweeps = detect_asia_and_pd_sweeps(cl15, pdh, pdl, pwh=pwh, pwl=pwl, pmh=pmh, pml=pml)
     sweep15 = detect_liquidity_sweep(cl15, cache_key="XAU_15m")
     sweep5 = detect_liquidity_sweep(cl5, cache_key="XAU_5m")
     eqh, eql = detect_equal_highs_lows(cl15, cache_key="XAU_15m")
@@ -3244,6 +3318,23 @@ async def analyze_gold_market(session, run_deep_scoring=True):
                     score += 5
                     confirmations.append(f"Above NY 00:00 Open ({d_open} +5)")
 
+            # 1 Oylik (30 kunlik) Dealing Range & 1W/1M Trend tahlili
+            if month_eq:
+                if active_bias == "bullish" and price <= month_eq:
+                    score += 5
+                    confirmations.append(f"1M Discount (<{month_eq} +5)")
+                elif active_bias == "bearish" and price >= month_eq:
+                    score += 5
+                    confirmations.append(f"1M Premium (>{month_eq} +5)")
+            if b1d == active_bias and (b1w == active_bias or b1m == active_bias):
+                score += 6
+                confirmations.append("1D+1W/1M Macro Trend Aligned (+6)")
+            for hz in htf_zones:
+                if hz.get("type") == active_bias and (hz["bottom"] - 2.5 <= price <= hz["top"] + 2.5):
+                    score += 8
+                    confirmations.append(f"HTF {hz.get('tf', '4H')} {hz['kind']} Zona (+8)")
+                    break
+
             # Trading in the Zone: Anti-Tilt & Anti-Euphoria + Kunlik 7-10 Signal Pacing
             psych = await check_psychology_guard()
             if psych["note"]:
@@ -3278,7 +3369,10 @@ async def analyze_gold_market(session, run_deep_scoring=True):
         "raw_bybit": _LIVE_BYBIT_RAW_PRICE,
         "offset": _CURRENT_OFFSET,
         "b5": b5, "b15": b15, "b1h": b1h, "b4h": b4h, "b1d": b1d,
-        "pdh": pdh, "pdl": pdl,
+        "b1w": b1w, "b1m": b1m,
+        "pdh": pdh, "pdl": pdl, "pwh": pwh, "pwl": pwl, "pmh": pmh, "pml": pml,
+        "month_high": month_high, "month_low": month_low, "month_eq": month_eq,
+        "htf_zones": htf_zones,
         "asia_high": sweeps["asia_high"], "asia_low": sweeps["asia_low"],
         "bull_sweep": sweeps["bull_sweep"], "bear_sweep": sweeps["bear_sweep"],
         "eq15": struct15.get("eq"),
@@ -3322,7 +3416,10 @@ async def format_status_message(status):
 
     lines = [
         f"📊 <b>GOLD: {status['price']}</b>",
-        f"Trend: 5m {trend_txt(status['b5'])} | 15m {trend_txt(status['b15'])} | 1H {trend_txt(status['b1h'])} | 4H {trend_txt(status['b4h'])}",
+        f"Trend (LTF/MTF): 5m {trend_txt(status['b5'])} | 15m {trend_txt(status['b15'])} | 1H {trend_txt(status['b1h'])} | 4H {trend_txt(status['b4h'])}",
+        f"Macro (1 Oy): 1D {trend_txt(status.get('b1d'))} | 1W {trend_txt(status.get('b1w'))} | 1M {trend_txt(status.get('b1m'))}",
+        f"1 Oylik Diapazon: <code>{status.get('month_low')} — {status.get('month_high')}</code> (EQ 50%: <code>{status.get('month_eq')}</code>)",
+        f"Likvidlik: PDH/L <code>{status.get('pdh')}/{status.get('pdl')}</code> | PWH/L <code>{status.get('pwh')}/{status.get('pwl')}</code> | PMH/L <code>{status.get('pmh')}/{status.get('pml')}</code>",
         f"Sessiya: {status['session'].upper()} ({kz_txt}) | Yangilik: {news_txt}",
         f"💰 Balans: <b>${acc['balance']:.2f}</b>",
     ]
@@ -3580,6 +3677,17 @@ async def handle_command(session, chat_id, text, message_id=None):
         if not bear_z:
             lines.append(" • yo'q")
 
+        htf_z = status.get("htf_zones") or []
+        if htf_z:
+            lines.append("\n🏛 <b>1 Oylik HTF (4H/1D) Zonalar:</b>")
+            htf_sorted = sorted(htf_z, key=lambda z: abs(p - z["ce"]))[:6]
+            for z in htf_sorted:
+                icon = "🟢" if z["type"] == "bullish" else "🔴"
+                lines.append(
+                    f" • {icon} <b>{z.get('tf', '4H')} {z['kind']}</b>: "
+                    f"<code>{z['bottom']:.2f} — {z['top']:.2f}</code> (CE: {z['ce']:.2f})"
+                )
+
         await send_telegram(session, "\n".join(lines), chat_id=cid)
 
     elif cmd == "/exness":
@@ -3787,10 +3895,13 @@ async def handle_command(session, chat_id, text, message_id=None):
         )
         ctx = (
             f"Joriy XAUUSD narxi: {status['price']} | Sessiya: {status['session']}\n"
-            f"MTF: 5m={status['b5']}, 15m={status['b15']} ({status['event15']}), 1H={status['b1h']}, 4H={status['b4h']}\n"
-            f"EQ(50%): {status['eq15']} | OTE: {status['ote_bottom']}-{status['ote_top']} | "
-            f"PDH/PDL: {status['pdh']}/{status['pdl']} | EQH/EQL: {status['eqh']}/{status['eql']}\n"
-            f"Savol: {user_q or 'Hozirgi bozor holati, likvidlik qayerda va qaysi zonadan kirish xavfsiz?'}"
+            f"MTF: 5m={status['b5']}, 15m={status['b15']} ({status['event15']}), 1H={status['b1h']}, 4H={status['b4h']}, "
+            f"1D={status.get('b1d')}, 1W={status.get('b1w')}, 1M={status.get('b1m')}\n"
+            f"15m EQ(50%): {status['eq15']} | OTE: {status['ote_bottom']}-{status['ote_top']}\n"
+            f"1 Oylik (30 kun) Diapazon: {status.get('month_low')} - {status.get('month_high')} (1M EQ 50%: {status.get('month_eq')})\n"
+            f"Likvidlik: PDH/PDL={status['pdh']}/{status['pdl']} | PWH/PWL={status.get('pwh')}/{status.get('pwl')} | "
+            f"PMH/PML={status.get('pmh')}/{status.get('pml')} | EQH/EQL={status['eqh']}/{status['eql']}\n"
+            f"Savol: {user_q or 'Hozirgi 1 oylik va kunlik bozor holati, likvidlik qayerda va qaysi zonadan kirish xavfsiz?'}"
         )
         await send_telegram(session, "🧠 <i>Gemini AI tahlil qilmoqda...</i>", chat_id=cid)
         ans = await ask_gemini_ai(session, ctx, system_instruction=sys_p)
