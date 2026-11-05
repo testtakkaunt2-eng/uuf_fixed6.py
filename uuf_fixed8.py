@@ -1965,8 +1965,33 @@ def render_ake_chart_png(candles_1m, ake_trade=None, ake_stats=None, scalp_band=
     brk_lbl = _ACTIVE_BROKER.upper()
     hdr = f"{brk_lbl} XAUUSD 1M | AKE SIGNALS 7 | PRICE: {last_p:.2f}"
     draw_text(margin_left, 10, hdr, (25, 32, 45), scale=2)
+    sub_info = []
     if scalp_band:
-        draw_text(margin_left, 28, f"SCALP BAND: {scalp_band[0]:.2f} - {scalp_band[1]:.2f}", (180, 115, 20), scale=1)
+        sub_info.append(f"SCALP BAND: {scalp_band[0]:.2f} - {scalp_band[1]:.2f}")
+    if ake_trade and ake_trade.get("asia_high") and ake_trade.get("asia_low"):
+        sub_info.append(f"ASIA (18-02): {ake_trade['asia_low']:.2f} - {ake_trade['asia_high']:.2f}")
+    if sub_info:
+        draw_text(margin_left, 28, " | ".join(sub_info), (170, 110, 20), scale=1)
+
+    # TradingView uslubidagi AsiaSessionHigh va AsiaSessionLow gorizontal chiziqlari (18:00 - 02:00)
+    ash = ake_trade.get("asia_high") if ake_trade else None
+    asl = ake_trade.get("asia_low") if ake_trade else None
+    if ash and p_min <= ash <= p_max:
+        ash_y = price_to_y(ash)
+        draw_hline(ash_y, margin_left, width - margin_right, (120, 95, 215), dashed=True)
+        draw_text(width - margin_right - 145, ash_y - 8, f"ASIA HIGH {ash:.2f}", (120, 95, 215), scale=1)
+    if asl and p_min <= asl <= p_max:
+        asl_y = price_to_y(asl)
+        draw_hline(asl_y, margin_left, width - margin_right, (120, 95, 215), dashed=True)
+        draw_text(width - margin_right - 140, asl_y + 3, f"ASIA LOW {asl:.2f}", (120, 95, 215), scale=1)
+
+    # Scalp Band kanal chiziqlari
+    if scalp_band:
+        sb_low, sb_high = scalp_band[0], scalp_band[1]
+        if p_min <= sb_high <= p_max:
+            draw_hline(price_to_y(sb_high), margin_left, width - margin_right, (215, 160, 45), dashed=True)
+        if p_min <= sb_low <= p_max:
+            draw_hline(price_to_y(sb_low), margin_left, width - margin_right, (215, 160, 45), dashed=True)
 
     # Pastki chap burchakdagi O'zbekcha Ake signals 7 statistika jadvali
     if ake_stats:
@@ -4149,17 +4174,47 @@ def _calc_ema_series(closes, period):
         ema.append(p * k + ema[-1] * (1.0 - k))
     return ema
 
-def compute_ake_Asia_1800_0200(cl1):
-    """Skrinshotdagi 'AsiaSessionHi... 1800-0200' darajalarini hisoblash."""
-    if not cl1:
+def compute_ake_Asia_1800_0200(cl1, cl15=None):
+    """Skrinshot va videolardagi 'AsiaSessionHi... 1800-0200' darajalarini hisoblash (24-30 soatlik to'liq tarix bo'yicha)."""
+    bars_to_check = []
+    if cl15 and len(cl15) >= 20:
+        bars_to_check = cl15[-120:]  # 15m da 120 ta sham = 30 soatlik to'liq kunlik davr
+    elif cl1 and len(cl1) >= 20:
+        bars_to_check = cl1[-720:]   # 1m da 720 ta sham = 12 soatlik davr
+    if not bars_to_check:
         return None, None
-    asia_bars = []
-    for c in cl1[-240:]:
+
+    # Eng so'nggi 18:00 - 02:00 sessiya shamlarini guruhlash
+    now_utc = datetime.datetime.now(datetime.timezone.utc)
+    asia_sessions = []
+    cur_session = []
+
+    for c in bars_to_check:
         dt = datetime.datetime.fromtimestamp(c[0] / 1000.0, tz=datetime.timezone.utc)
-        if dt.hour >= AKE_ASIA_START_HOUR_UTC or dt.hour < AKE_ASIA_END_HOUR_UTC:
-            asia_bars.append(c)
-    if len(asia_bars) >= 5:
-        return round(max(c[H] for c in asia_bars), 2), round(min(c[L] for c in asia_bars), 2)
+        is_asia_hour = (dt.hour >= AKE_ASIA_START_HOUR_UTC or dt.hour < AKE_ASIA_END_HOUR_UTC)
+        if is_asia_hour:
+            cur_session.append(c)
+        else:
+            if len(cur_session) >= 3:
+                asia_sessions.append(list(cur_session))
+            cur_session = []
+    if len(cur_session) >= 3:
+        asia_sessions.append(list(cur_session))
+
+    target_session = asia_sessions[-1] if asia_sessions else cur_session
+    if len(target_session) >= 3:
+        h = max(c[H] for c in target_session)
+        l = min(c[L] for c in target_session)
+        return round(h, 2), round(l, 2)
+
+    # Zaxira: so'nggi 24 soat ichidagi barcha 18-02 shamlar
+    all_asia = [
+        c for c in bars_to_check
+        if (datetime.datetime.fromtimestamp(c[0] / 1000.0, tz=datetime.timezone.utc).hour >= AKE_ASIA_START_HOUR_UTC or
+            datetime.datetime.fromtimestamp(c[0] / 1000.0, tz=datetime.timezone.utc).hour < AKE_ASIA_END_HOUR_UTC)
+    ]
+    if len(all_asia) >= 3:
+        return round(max(c[H] for c in all_asia[-32:]), 2), round(min(c[L] for c in all_asia[-32:]), 2)
     return None, None
 
 def _compute_supertrend_1m(cl1, period=10, mult=2.2):
@@ -4255,7 +4310,7 @@ def analyze_ake_1m_scalp(cl1, cl5, price, last_closed_ake=None):
     hh_30 = max(c[H] for c in win_30)
     ll_30 = min(c[L] for c in win_30)
     pos_30 = (price - ll_30) / max(hh_30 - ll_30, 0.5)
-    asia_h, asia_l = compute_ake_Asia_1800_0200(cl1)
+    asia_h, asia_l = compute_ake_Asia_1800_0200(cl1, cl15=cl5)
 
     last = cl1[-1]
     prev = cl1[-2]
@@ -4466,6 +4521,15 @@ def analyze_ake_1m_scalp(cl1, cl5, price, last_closed_ake=None):
                 tp4 = round(entry - risk_1r * 4.0, 2)
                 tp5 = round(entry - risk_1r * 5.0, 2)
 
+            # 15m / 1H HTF SMC Zone bilan moslikni aniqlash
+            htf_match_str = None
+            if zones_htf:
+                for hz in zones_htf:
+                    if hz.get("type") == ("bullish" if sig_side == "LONG" else "bearish"):
+                        if (hz["bottom"] - 1.50) <= entry <= (hz["top"] + 1.50):
+                            htf_match_str = f"15m {hz['kind']} ({hz['bottom']:.2f} — {hz['top']:.2f})"
+                            break
+
             candidate = {
                 "engine": "AKE_SIGNALS_7",
                 "signal": sig_side,
@@ -4480,6 +4544,7 @@ def analyze_ake_1m_scalp(cl1, cl5, price, last_closed_ake=None):
                 "tp4": tp4,
                 "tp5": tp5,
                 "max_r_hit": 0,
+                "htf_confluence": htf_match_str,
                 "zone_tf": matched_zone.get("tf", "1m") if matched_zone else "1m",
                 "zone_kind": matched_zone.get("kind", "Scalp") if matched_zone else "Scalp",
                 "zone_bottom": round(matched_zone["bottom"], 2) if matched_zone else round(scalp_low, 2),
@@ -4490,6 +4555,8 @@ def analyze_ake_1m_scalp(cl1, cl5, price, last_closed_ake=None):
                 "reason": " + ".join(sig_reason),
                 "bar_ts": last[0],
                 "opened_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                "asia_high": asia_h,
+                "asia_low": asia_l,
             }
 
     return {
@@ -4619,16 +4686,19 @@ def format_ake_signal_message(trade, balance=None):
     r_usd = round((lot / XM_MIN_LOT) * float(trade["risk_pts"]) * XM_OZ_PER_MIN_LOT, 2)
     brk = _ACTIVE_BROKER.upper()
     bal_txt = f" | 💰 Balans: <b>${float(balance):.2f}</b>" if balance is not None else ""
-    z_kind = trade.get("zone_kind", "OB/FVG")
+    z_kind = trade.get("zone_kind", "Scalp")
     z_tf = trade.get("zone_tf", "1m")
     z_bot = trade.get("zone_bottom")
     z_top = trade.get("zone_top")
     z_ce = trade.get("zone_ce")
+    htf_conf = trade.get("htf_confluence")
     zone_line = (
         f"🎯 Zona ({z_tf} <b>{html.escape(str(z_kind))}</b>): <code>{z_bot:.2f} — {z_top:.2f}</code> (CE: <code>{z_ce:.2f}</code>)"
         if (z_bot is not None and z_top is not None)
         else f"🎯 Zona: <b>{html.escape(str(z_kind))}</b>"
     )
+    if htf_conf:
+        zone_line += f"\n🏛 HTF Moslik: <b>{html.escape(str(htf_conf))}</b>" 
     lines = [
         f"⚡ <b>Ake signals 7 ({brk}) — {tag}</b> [1m Skalp]",
         f"Kirish (E): <code>{trade['entry']:.2f}</code> | Lot: <code>{lot:.2f}</code>{bal_txt}",
@@ -4742,6 +4812,13 @@ async def monitor_ake_trade(session, price):
                     notes.append(
                         f"🔥 <b>[Ake signals 7 · 1m] {side_txt(trade['signal'])} TP{k} (+{k}.0R) olindi ✓</b> "
                         f"(<code>{tp_lvl:.2f}</code>) | SL ➡️ TP{k-1} (<code>{prev_tp:.2f}</code> +{k-1}.0R)"
+                    )
+                elif k == 5:
+                    prev_tp = float(trade["tp4"])
+                    trade["sl"] = prev_tp
+                    notes.append(
+                        f"🎯 <b>[Ake signals 7 · 1m] {side_txt(trade['signal'])} TP5 (+5.0R) MAX OLINDI 🚀</b> "
+                        f"(<code>{tp_lvl:.2f}</code>) | Bitim to'liq rekordli foyda bilan yopildi!"
                     )
 
         if max_hit >= 5 and reached(float(trade["tp5"])):
