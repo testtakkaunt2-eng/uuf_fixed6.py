@@ -154,7 +154,8 @@ AKE_MIN_SL_POINTS = 1.60           # 1m scalp minimal SL (1R) masofasi ($)
 AKE_MAX_SL_POINTS = 3.80           # 1m scalp maksimal SL (1R) masofasi ($)
 AKE_ATR_SL_MULT = 1.45             # 1m ATR ko'paytmasi (1R hisoblash uchun)
 AKE_TP_R_LEVELS = (1.0, 2.0, 3.0, 4.0, 5.0)  # TP1=1R, TP2=2R, TP3=3R, TP4=4R, TP5=5R
-AKE_COOLDOWN_SEC = 180             # 1m Ake signallar orasida minimal kutish (3 daqiqa)
+AKE_COOLDOWN_SEC = 600             # 1m Ake signallar orasida minimal kutish (10 daqiqa, shovqinni kesish uchun)
+AKE_FLIP_AFTER_TP1_MIN_SEC = 600   # Faqat TP1 olingandan keyin va kamida 10 daq o'tgach teskari impulsga ruxsat
 AKE_ASIA_START_HOUR_UTC = 18       # AsiaSessionHigh/Low 18:00 - 02:00
 AKE_ASIA_END_HOUR_UTC = 2
 EXNESS_AUTOTRADE_DEFAULT_MODE = "day"  # "day" | "ake" | "both"
@@ -582,6 +583,11 @@ class DatabaseManager:
                     }
                     for r in rows
                 ]
+
+    async def clear_ake_trades(self):
+        async with self._lock:
+            await self._conn.execute("DELETE FROM ake_trades")
+            await self._conn.commit()
 
     async def get_recent_ake_trades(self, limit=15):
         async with self._lock:
@@ -1648,11 +1654,20 @@ def render_ake_chart_png(candles_1m, ake_trade=None, ake_stats=None, scalp_band=
         draw_text(width - margin_right + 8, gy - 3, f"{gp:.2f}", (70, 78, 92), scale=1)
 
     n_bars = len(window)
-    step_x = plot_w / max(n_bars, 1)
+    proj_bars = 16 if ake_trade else 2
+    total_slots = n_bars + proj_bars
+    step_x = plot_w / max(total_slots, 1)
 
-    # Draw Ake Signals 7 TP1..TP5 (green) & SL -1R (red) box
+    # Draw Ake Signals 7 TP1..TP5 (green) & SL -1R (red) box starting from exact entry candle and projecting right
     if ake_trade:
-        zx1 = int(margin_left + max(0, n_bars - 22) * step_x)
+        entry_bar_ts = ake_trade.get("bar_ts")
+        entry_idx = n_bars - 1
+        if entry_bar_ts:
+            for idx_b, cb in enumerate(window):
+                if cb[0] >= entry_bar_ts:
+                    entry_idx = idx_b
+                    break
+        zx1 = int(margin_left + (entry_idx + 0.5) * step_x)
         zx2 = width - margin_right - 4
         ey = price_to_y(ake_trade["entry"])
         sly = price_to_y(ake_trade.get("initial_sl", ake_trade["sl"]))
@@ -3789,28 +3804,93 @@ def compute_ake_Asia_1800_0200(cl1):
         return round(max(c[H] for c in asia_bars), 2), round(min(c[L] for c in asia_bars), 2)
     return None, None
 
+def _compute_supertrend_1m(cl1, period=10, mult=2.2):
+    """TradingView Ake signals 7 uchun 1m ATR Supertrend (Scalp Trend) liniyasi va trend almashishi."""
+    n = len(cl1)
+    if n < period + 5:
+        return None, None, False, False
+
+    trs = [cl1[0][H] - cl1[0][L]]
+    for i in range(1, n):
+        trs.append(max(
+            cl1[i][H] - cl1[i][L],
+            abs(cl1[i][H] - cl1[i - 1][C]),
+            abs(cl1[i][L] - cl1[i - 1][C]),
+        ))
+
+    upper_band = [0.0] * n
+    lower_band = [0.0] * n
+    trend = [1] * n
+
+    for i in range(period, n):
+        atr = sum(trs[i - period + 1:i + 1]) / period
+        hl2 = (cl1[i][H] + cl1[i][L]) / 2.0
+        basic_upper = hl2 + mult * atr
+        basic_lower = hl2 - mult * atr
+
+        if i == period:
+            upper_band[i] = basic_upper
+            lower_band[i] = basic_lower
+            trend[i] = 1 if cl1[i][C] >= hl2 else -1
+            continue
+
+        if basic_upper < upper_band[i - 1] or cl1[i - 1][C] > upper_band[i - 1]:
+            upper_band[i] = basic_upper
+        else:
+            upper_band[i] = upper_band[i - 1]
+
+        if basic_lower > lower_band[i - 1] or cl1[i - 1][C] < lower_band[i - 1]:
+            lower_band[i] = basic_lower
+        else:
+            lower_band[i] = lower_band[i - 1]
+
+        if trend[i - 1] == -1 and cl1[i][C] > upper_band[i - 1]:
+            trend[i] = 1
+        elif trend[i - 1] == 1 and cl1[i][C] < lower_band[i - 1]:
+            trend[i] = -1
+        else:
+            trend[i] = trend[i - 1]
+
+    flipped_bull = (trend[-1] == 1 and trend[-2] == -1)
+    flipped_bear = (trend[-1] == -1 and trend[-2] == 1)
+    return trend[-1], (round(lower_band[-1], 2), round(upper_band[-1], 2)), flipped_bull, flipped_bear
+
 def analyze_ake_1m_scalp(cl1, cl5, price):
-    """Ake signals 7 (1m XAUUSD Scalping) algoritmi:
-    - Scalp Band (EMA 13 / EMA 34 + ATR kanal)
-    - 1m Micro-Swings (left=2, right=2) + Liquidity Grab / BOS / FVG / Displacement
-    - 1R Stop-Loss (-1R) va 5 bosqichli Take-Profit: TP1 (1R), TP2 (2R), TP3 (3R), TP4 (4R), TP5 (5R)
+    """Ake signals 7 (1m XAUUSD Scalping) — shovqindan va qayta-qayta BUY/SELL almashtirishdan himoyalangan motor:
+    1) Faqat haqiqiy 1m Supertrend (Scalp Band) buzilishi YOKI 15-shamlik ekstremum (Swing High/Low / Asia H/L) likvidligi
+       supurilib (Liquidity Grab) kuchli impuls sham yopilganda signal beradi.
+    2) Har bir shamda u yoqdan bu yoqqa sakramaydi: 5m strukturasi, RSI(14) va 1m impuls hajmi tekshiriladi.
+    3) 1R Stop-Loss (-1R) va 5 bosqichli Take-Profit: TP1 (1R), TP2 (2R), TP3 (3R), TP4 (4R), TP5 (5R).
     """
-    if not cl1 or len(cl1) < 40:
+    if not cl1 or len(cl1) < 55:
         return {"candidate": None, "scalp_band": None, "trend_1m": None}
 
     closes = [c[C] for c in cl1]
-    ema9 = _calc_ema_series(closes, 9)[-1]
-    ema21 = _calc_ema_series(closes, 21)[-1]
-    ema50 = _calc_ema_series(closes, 50)[-1]
+    ema9_list = _calc_ema_series(closes, 9)
+    ema21_list = _calc_ema_series(closes, 21)
+    ema50_list = _calc_ema_series(closes, 50)
+    ema9, ema21, ema50 = ema9_list[-1], ema21_list[-1], ema50_list[-1]
     atr1 = calculate_atr(cl1, 14) or 1.80
+    rsis1 = calculate_rsi(cl1, 14)
+    cur_rsi = rsis1[-1] if rsis1 and rsis1[-1] is not None else 50.0
+    prev_rsi = rsis1[-2] if len(rsis1) >= 2 and rsis1[-2] is not None else 50.0
 
-    scalp_low = round(min(ema9, ema21) - atr1 * 0.35, 2)
-    scalp_high = round(max(ema9, ema21) + atr1 * 0.35, 2)
-    trend_1m = "bullish" if ema9 >= ema21 else "bearish"
+    st_dir, st_bands, st_flip_bull, st_flip_bear = _compute_supertrend_1m(cl1, period=10, mult=2.2)
+    scalp_low = st_bands[0] if st_bands else round(min(ema9, ema21) - atr1 * 0.5, 2)
+    scalp_high = st_bands[1] if st_bands else round(max(ema9, ema21) + atr1 * 0.5, 2)
+    trend_1m = "bullish" if (st_dir == 1 or ema9 > ema21) else "bearish"
 
-    highs1, lows1 = find_swings(cl1, left=2, right=2)
-    last_sh = highs1[-1][1] if highs1 else max(c[H] for c in cl1[-12:-1])
-    last_sl = lows1[-1][1] if lows1 else min(c[L] for c in cl1[-12:-1])
+    # 5m trend filtri (agar cl5 berilgan bo'lsa)
+    b5 = confirmed_structure_bias(cl5, cache_key="XAU_5m") if (cl5 and len(cl5) >= 20) else None
+
+    # Oxirgi 12-15 ta 1m shamning haqiqiy High va Low ekstremumlari + 30 daqiqalik diapazon pozitsiyasi
+    lookback_15 = cl1[-15:-1]
+    swing_high_15 = max(c[H] for c in lookback_15)
+    swing_low_15 = min(c[L] for c in lookback_15)
+    win_30 = cl1[-30:]
+    hh_30 = max(c[H] for c in win_30)
+    ll_30 = min(c[L] for c in win_30)
+    pos_30 = (price - ll_30) / max(hh_30 - ll_30, 0.5)
     asia_h, asia_l = compute_ake_Asia_1800_0200(cl1)
 
     last = cl1[-1]
@@ -3818,82 +3898,93 @@ def analyze_ake_1m_scalp(cl1, cl5, price):
     prev2 = cl1[-3]
     rng = max(last[H] - last[L], 0.01)
     body = abs(last[C] - last[O])
-    lower_wick = min(last[O], last[C]) - last[L]
-    upper_wick = last[H] - max(last[O], last[C])
+    avg_body_10 = sum(abs(c[C] - c[O]) for c in cl1[-12:-2]) / 10.0
 
-    # 1m FVG va impuls tekshiruvi
-    bull_fvg_1m = last[L] > prev2[H] and prev[C] > prev[O]
-    bear_fvg_1m = last[H] < prev2[L] and prev[C] < prev[O]
+    # Sham haqiqatan impulsli bo'lishi shart (doji yoki mayda shovqin shamlar o'tkazilmaydi)
+    is_strong_bull_candle = (
+        last[C] > last[O]
+        and body >= max(avg_body_10 * 1.25, atr1 * 0.45, 0.45)
+        and (last[H] - last[C]) <= body * 0.55
+    )
+    is_strong_bear_candle = (
+        last[C] < last[O]
+        and body >= max(avg_body_10 * 1.25, atr1 * 0.45, 0.45)
+        and (last[C] - last[L]) <= body * 0.55
+    )
 
-    # 1) LONG (Buy) Ake Signal shartlari:
-    bull_sweep = (
-        (min(last[L], prev[L]) < last_sl and last[C] > last_sl and last[C] > last[O])
-        or (asia_l is not None and min(last[L], prev[L]) < asia_l and last[C] > asia_l and last[C] > last[O])
-    )
-    bull_bos_impulse = (
-        last[C] > last[O]
-        and body / rng >= 0.48
-        and last[C] > ema9
-        and (last[C] > last_sh or bull_fvg_1m or (last[C] > prev[H] and ema9 > ema21))
-    )
-    bull_pin_engulf = (
-        last[C] > last[O]
-        and prev[C] < prev[O]
-        and last[C] >= prev[O]
-        and (lower_wick / rng >= 0.35 or last[L] <= ema21)
+    bull_fvg_1m = (last[L] > prev2[H]) and (prev[C] > prev[O])
+    bear_fvg_1m = (last[H] < prev2[L]) and (prev[C] < prev[O])
+
+    # 1) LONG (Buy) Ake Signal — faqat 2 ta aniq institutional holatda:
+    # A) Liquidity Grab Reversal: 15-shamlik Low yoki Asia Low supurilib, kuchli yashil impuls sham EMA9 va prev High ustida yopilsa
+    bull_sweep_reversal = (
+        is_strong_bull_candle
+        and (
+            (min(last[L], prev[L]) < swing_low_15 and last[C] > swing_low_15)
+            or (asia_l is not None and min(last[L], prev[L]) < asia_l and last[C] > asia_l)
+        )
+        and last[C] > max(prev[O], prev[C])
         and last[C] >= ema9
+        and cur_rsi <= 66.0
+    )
+    # B) Scalp Supertrend Breakout BOS: Supertrend yangi Bullish ga almashsa (cho'qqining eng oxirida >82% quvlab kirmaslik sharti bilan)
+    bull_trend_breakout = (
+        is_strong_bull_candle
+        and st_dir == 1
+        and last[C] > ema21
+        and pos_30 <= 0.82
+        and b5 != "bearish"
+        and (st_flip_bull or (ema9 >= ema21 and last[C] > swing_high_15 and prev[C] <= swing_high_15 and bull_fvg_1m))
+        and 46.0 <= cur_rsi <= 68.0
     )
 
-    # 2) SHORT (Sell) Ake Signal shartlari:
-    bear_sweep = (
-        (max(last[H], prev[H]) > last_sh and last[C] < last_sh and last[C] < last[O])
-        or (asia_h is not None and max(last[H], prev[H]) > asia_h and last[C] < asia_h and last[C] < last[O])
-    )
-    bear_bos_impulse = (
-        last[C] < last[O]
-        and body / rng >= 0.48
-        and last[C] < ema9
-        and (last[C] < last_sl or bear_fvg_1m or (last[C] < prev[L] and ema9 < ema21))
-    )
-    bear_pin_engulf = (
-        last[C] < last[O]
-        and prev[C] > prev[O]
-        and last[C] <= prev[O]
-        and (upper_wick / rng >= 0.35 or last[H] >= ema21)
+    # 2) SHORT (Sell) Ake Signal — faqat 2 ta aniq institutional holatda:
+    # A) Liquidity Grab Reversal: 15-shamlik High yoki Asia High supurilib, kuchli qizil impuls sham EMA9 va prev Body ostida yopilsa
+    bear_sweep_reversal = (
+        is_strong_bear_candle
+        and (
+            (max(last[H], prev[H]) > swing_high_15 and last[C] < swing_high_15)
+            or (asia_h is not None and max(last[H], prev[H]) > asia_h and last[C] < asia_h)
+        )
+        and last[C] < min(prev[O], prev[C])
         and last[C] <= ema9
+        and cur_rsi >= 34.0
+    )
+    # B) Scalp Supertrend Breakout BOS: Supertrend yangi Bearish ga almashsa (tubning eng oxirida <18% quvlab SELL kirmaslik sharti bilan)
+    bear_trend_breakout = (
+        is_strong_bear_candle
+        and st_dir == -1
+        and last[C] < ema21
+        and pos_30 >= 0.18
+        and b5 != "bullish"
+        and (st_flip_bear or (ema9 <= ema21 and last[C] < swing_low_15 and prev[C] >= swing_low_15 and bear_fvg_1m))
+        and 32.0 <= cur_rsi <= 54.0
     )
 
     sig_side = None
     sig_reason = []
-    if bull_sweep or bull_bos_impulse or bull_pin_engulf:
-        if bull_sweep:
+    if bull_sweep_reversal or bull_trend_breakout:
+        sig_side = "LONG"
+        if bull_sweep_reversal:
             sig_reason.append("1m Liquidity Grab + Reversal")
-        if bull_bos_impulse:
-            sig_reason.append("1m Scalp Impulse BOS")
-        if bull_pin_engulf:
-            sig_reason.append("1m Bullish Engulfing")
-        if ema9 >= ema50 or bull_sweep:
-            sig_side = "LONG"
-
-    if sig_side is None and (bear_sweep or bear_bos_impulse or bear_pin_engulf):
-        if bear_sweep:
+        if bull_trend_breakout:
+            sig_reason.append("1m Scalp Supertrend BOS")
+    elif bear_sweep_reversal or bear_trend_breakout:
+        sig_side = "SHORT"
+        if bear_sweep_reversal:
             sig_reason.append("1m Liquidity Grab + Reversal")
-        if bear_bos_impulse:
-            sig_reason.append("1m Scalp Impulse BOS")
-        if bear_pin_engulf:
-            sig_reason.append("1m Bearish Engulfing")
-        if ema9 <= ema50 or bear_sweep:
-            sig_side = "SHORT"
+        if bear_trend_breakout:
+            sig_reason.append("1m Scalp Supertrend BOS")
 
     candidate = None
     if sig_side:
         entry = round(price, 2)
-        recent_low_5 = min(c[L] for c in cl1[-5:])
-        recent_high_5 = max(c[H] for c in cl1[-5:])
+        recent_low_6 = min(c[L] for c in cl1[-6:])
+        recent_high_6 = max(c[H] for c in cl1[-6:])
         atr_risk = round(atr1 * AKE_ATR_SL_MULT, 2)
 
         if sig_side == "LONG":
-            raw_sl_dist = max(entry - (recent_low_5 - XM_SPREAD_BUFFER), atr_risk)
+            raw_sl_dist = max(entry - (recent_low_6 - XM_SPREAD_BUFFER), atr_risk)
             risk_1r = round(min(max(raw_sl_dist, AKE_MIN_SL_POINTS), AKE_MAX_SL_POINTS), 2)
             sl = round(entry - risk_1r, 2)
             tp1 = round(entry + risk_1r * 1.0, 2)
@@ -3902,7 +3993,7 @@ def analyze_ake_1m_scalp(cl1, cl5, price):
             tp4 = round(entry + risk_1r * 4.0, 2)
             tp5 = round(entry + risk_1r * 5.0, 2)
         else:
-            raw_sl_dist = max((recent_high_5 + XM_SPREAD_BUFFER) - entry, atr_risk)
+            raw_sl_dist = max((recent_high_6 + XM_SPREAD_BUFFER) - entry, atr_risk)
             risk_1r = round(min(max(raw_sl_dist, AKE_MIN_SL_POINTS), AKE_MAX_SL_POINTS), 2)
             sl = round(entry + risk_1r, 2)
             tp1 = round(entry - risk_1r * 1.0, 2)
@@ -4074,6 +4165,9 @@ async def close_ake_trade(session, trade, price, reason_label="SL"):
         logger.error(f"Ake trade DB yozish xato: {_safe_log_error(e)}")
 
     await db.state_set("current_trade_ake", None)
+    ex_mode = await db.state_get("exness_mode", EXNESS_AUTOTRADE_DEFAULT_MODE)
+    if ex_mode in ("ake", "both"):
+        _spawn(sync_exness_positions_action(action="close"))
     st = await get_ake_stats_summary()
     d = st["day"]
     await send_telegram(
@@ -4138,6 +4232,9 @@ async def monitor_ake_trade(session, price):
 
         if changed:
             await db.state_set("current_trade_ake", trade)
+            ex_mode = await db.state_get("exness_mode", EXNESS_AUTOTRADE_DEFAULT_MODE)
+            if ex_mode in ("ake", "both"):
+                _spawn(sync_exness_positions_action(action="modify_sl", new_sl=trade["sl"]))
         for n in notes:
             await send_telegram(session, n)
 
@@ -4167,7 +4264,7 @@ async def scanner_loop(app):
                     c1_raw = await fetch_ohlcv(session, "1m", limit=AKE_LIMIT)
                     cl1_ake = closed_only(c1_raw)
                     _LAST_CANDLES_1M = cl1_ake
-                    ake_info = analyze_ake_1m_scalp(cl1_ake, [], price)
+                    ake_info = analyze_ake_1m_scalp(cl1_ake, status.get('cl15', []), price)
                     _LAST_AKE_INFO = ake_info
 
                     ake_trade = await db.state_get("current_trade_ake")
@@ -4178,14 +4275,26 @@ async def scanner_loop(app):
                     ake_cand = ake_info.get("candidate")
                     if ake_cand and not status["news_blocked"]:
                         ake_bar_key = f"{ake_cand['bar_ts']}_{ake_cand['signal']}"
-                        is_ake_flip = ake_trade is not None and ake_cand["signal"] != ake_trade["signal"]
-                        ake_cd_ok = (time.time() - last_ake_signal_time) >= AKE_COOLDOWN_SEC or is_ake_flip
+                        elapsed_since_ake = time.time() - last_ake_signal_time
+                        ake_cd_ok = elapsed_since_ake >= AKE_COOLDOWN_SEC
 
-                        if ake_bar_key != last_ake_bar_ts and (ake_trade is None or is_ake_flip) and ake_cd_ok:
+                        # MUHIM QOIDA: Ochiq Ake bitimi hali TP1 (+1R) ga yetmagan bo'lsa,
+                        # uni teskari signal (FLIP) bilan erta yopish QAT'IYAN TAQIQLANADI!
+                        # Bitim to'liq SL (-1R) yoki TP1..TP5 gacha ishlashi shart.
+                        can_flip_after_tp1 = (
+                            ake_trade is not None
+                            and ake_cand["signal"] != ake_trade["signal"]
+                            and int(ake_trade.get("max_r_hit", 0)) >= 1
+                            and elapsed_since_ake >= AKE_FLIP_AFTER_TP1_MIN_SEC
+                        )
+
+                        if ake_bar_key != last_ake_bar_ts and (
+                            (ake_trade is None and ake_cd_ok) or can_flip_after_tp1
+                        ):
                             async with _ake_monitor_lock:
                                 cur_ake = await db.state_get("current_trade_ake")
                                 if cur_ake and cur_ake["signal"] != ake_cand["signal"]:
-                                    await close_ake_trade(session, cur_ake, price, reason_label="FLIP")
+                                    await close_ake_trade(session, cur_ake, price, reason_label="TRAIL_SL")
                                 await db.state_set("current_trade_ake", ake_cand)
                                 last_ake_bar_ts = ake_bar_key
                                 last_ake_signal_time = time.time()
@@ -4471,6 +4580,17 @@ async def handle_command(session, chat_id, text, message_id=None):
                     f"<code>{r['entry']:.2f} ➡️ {r['close_price']:.2f}</code> (Rekord: <b>{r['peak_r']:+.1f}R</b>)"
                 )
         await send_telegram(session, msg, with_keyboard=True, chat_id=cid)
+
+    elif cmd == "/ake_reset":
+        async with _ake_monitor_lock:
+            await db.clear_ake_trades()
+            await db.state_set("current_trade_ake", None)
+        await send_telegram(
+            session,
+            "🧹 <b>Ake signals 7 (1m) tarixi va eski FLIP bitimlar tozalandi!</b>\n"
+            "Endi bitim TP1 (+1R) yoki SL (-1R) ga yetmasdan turib BUY/SELL almashmaydi (FLIP qilmaydi).",
+            chat_id=cid,
+        )
 
     elif cmd == "/ake_close":
         async with _ake_monitor_lock:
