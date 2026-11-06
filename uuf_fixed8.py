@@ -3297,6 +3297,14 @@ async def _allowed_ids():
 async def is_allowed(cid):
     return ALLOW_PUBLIC or str(cid) in await _allowed_ids()
 
+async def _delayed_delete_telegram_message(session, chat_id, message_id, delay_sec=20):
+    """Chat tarixini toza tutish uchun xabarni 20 soniyadan keyin avtomatik o'chiradi."""
+    try:
+        await asyncio.sleep(delay_sec)
+        await delete_telegram_message(session, chat_id, message_id)
+    except Exception as e:
+        logger.debug(f"Kechiktirilgan o'chirish xatosi (chat={chat_id}, msg={message_id}): {e}")
+
 async def delete_telegram_message(session, chat_id, message_id):
     if not chat_id or not message_id:
         return
@@ -3307,7 +3315,7 @@ async def delete_telegram_message(session, chat_id, message_id):
     except Exception:
         pass
 
-async def send_telegram(session, text, with_keyboard=False, chat_id=None, parse_mode="HTML"):
+async def send_telegram(session, text, with_keyboard=False, chat_id=None, parse_mode="HTML", auto_delete_after=None):
     if chat_id:
         targets = [chat_id]
     else:
@@ -3321,7 +3329,7 @@ async def send_telegram(session, text, with_keyboard=False, chat_id=None, parse_
     kb_rows = [
         ["📊 Day Signal", "🖼 Day Grafik", "📈 Day Stat"],
         ["⚡ Ake Signal", "📉 Ake Grafik", "📋 Ake Stat"],
-        ["🎯 Zonalar", "🧠 AI Tahlil", "🏦 Exness Hisoblar"],
+        ["🎯 Zonalar", "📏 Ake Zonalar", "🏦 Exness Hisoblar"],
     ]
     if WEBAPP_URL:
         kb_rows.insert(0, [{"text": "📱 Mini App Boshqaruv Paneli", "web_app": {"url": WEBAPP_URL}}])
@@ -3349,6 +3357,13 @@ async def send_telegram(session, text, with_keyboard=False, chat_id=None, parse_
                             await asyncio.sleep(data.get("parameters", {}).get("retry_after", 1))
                             continue
                         if r.status == 200:
+                            try:
+                                data = await r.json()
+                                mid = data.get("result", {}).get("message_id")
+                                if auto_delete_after and mid:
+                                    _spawn(_delayed_delete_telegram_message(session, target, mid, delay_sec=auto_delete_after))
+                            except Exception:
+                                pass
                             break
                         _metrics["tg_errors"] += 1
                         if r.status == 400 and use_mode:
@@ -3361,7 +3376,7 @@ async def send_telegram(session, text, with_keyboard=False, chat_id=None, parse_
                     break
         await asyncio.sleep(0.05)
 
-async def send_telegram_photo(session, png_bytes, caption="", chat_id=None):
+async def send_telegram_photo(session, png_bytes, caption="", chat_id=None, auto_delete_after=None):
     if not png_bytes:
         return
     if chat_id:
@@ -3385,6 +3400,13 @@ async def send_telegram_photo(session, png_bytes, caption="", chat_id=None):
                 form.add_field("photo", png_bytes, filename="xm_gold_smc.png", content_type="image/png")
                 async with session.post(url, data=form, timeout=T(20)) as r:
                     if r.status == 200:
+                        try:
+                            p_data = await r.json()
+                            p_mid = p_data.get("result", {}).get("message_id")
+                            if auto_delete_after and p_mid:
+                                _spawn(_delayed_delete_telegram_message(session, target, p_mid, delay_sec=auto_delete_after))
+                        except Exception:
+                            pass
                         break
                     if r.status == 429:
                         data = await r.json()
@@ -3462,7 +3484,9 @@ async def close_trade(session, trade, result, price):
         session,
         f"{sign_icon} <b>{side_txt(trade['signal'])} yopildi</b> — {html.escape(result_txt(result))}\n"
         f"Narx: <code>{price}</code> | Natija: <b>{pnl_usd:+.2f}$</b> ({r_mult:+.2f}R)\n"
-        f"💰 Balans: <b>${new_balance:.2f}</b>",
+        f"💰 Balans: <b>${new_balance:.2f}</b>\n"
+        f"<i>⏱ Chat toza turishi uchun xabar 20 soniyadan keyin avtomatik o'chiriladi</i>",
+        auto_delete_after=20,
     )
     if result == "SL" and GEMINI_API_KEY and SEND_AI_EXTRA_MESSAGES:
         _spawn(_ai_post_mortem(session, dict(trade), price))
@@ -3633,7 +3657,7 @@ async def increment_daily_signal_count():
 async def analyze_gold_market(session, run_deep_scoring=True):
     global _LAST_CANDLES_15M, _LAST_STRUCT_15M, _LIVE_BYBIT_RAW_PRICE
     c1, c5, c15 = await asyncio.gather(
-        fetch_ohlcv(session, "1m", limit=90),
+        fetch_ohlcv(session, "1m", limit=AKE_LIMIT),
         fetch_ohlcv(session, "5m", limit=LIMIT),
         fetch_ohlcv(session, "15m", limit=LIMIT),
         return_exceptions=True,
@@ -3666,6 +3690,14 @@ async def analyze_gold_market(session, run_deep_scoring=True):
     struct5 = analyze_market_structure(cl5, cache_key="XAU_5m")
     struct15 = analyze_market_structure(cl15, cache_key="XAU_15m")
     _LAST_STRUCT_15M = struct15
+
+    # ===== BIRLASHTIRILGAN TAHLIL: Ake Signals 7 (1m) & Day Trading (15m/5m SMC) =====
+    global _LAST_CANDLES_1M, _LAST_AKE_INFO
+    _LAST_CANDLES_1M = cl1
+    recent_ake_list = await db.get_recent_ake_trades(limit=1)
+    last_closed_ake = recent_ake_list[0] if recent_ake_list else None
+    ake_info = analyze_ake_1m_scalp(cl1, cl15, price, last_closed_ake=last_closed_ake)
+    _LAST_AKE_INFO = ake_info
 
     b5 = struct5["bias"]
     b15 = struct15["bias"]
@@ -3869,6 +3901,9 @@ async def analyze_gold_market(session, run_deep_scoring=True):
         "pdh": pdh, "pdl": pdl, "pwh": pwh, "pwl": pwl, "pmh": pmh, "pml": pml,
         "month_high": month_high, "month_low": month_low, "month_eq": month_eq,
         "htf_zones": htf_zones,
+        "cl1": cl1,
+        "ake_info": ake_info,
+        "ake_cand": ake_info.get("candidate"),
         "asia_high": sweeps["asia_high"], "asia_low": sweeps["asia_low"],
         "bull_sweep": sweeps["bull_sweep"], "bear_sweep": sweeps["bear_sweep"],
         "eq15": struct15.get("eq"),
@@ -4534,7 +4569,9 @@ async def close_ake_trade(session, trade, price, reason_label="SL"):
         f"E: <code>{entry:.2f}</code> ➡️ Yopildi: <code>{price:.2f}</code> | Rekord TP: <b>{peak_r:+.1f}R</b>\n"
         f"💵 Natija: <b>{pnl_usd:+.2f}$</b> | 💰 Umumiy Balans: <b>${new_balance:.2f}</b>\n"
         f"📊 Bugun (Kun): <b>{d['total']}</b> bitim | TP olindi: <b>{d['wins']} ({d['wr']}%)</b> | "
-        f"Stop -1R: <b>{d['losses']}</b> | Jami: <b>{d['total_r']:+.1f}R</b>",
+        f"Stop -1R: <b>{d['losses']}</b> | Jami: <b>{d['total_r']:+.1f}R</b>\n"
+        f"<i>⏱ Chat toza turishi uchun xabar 20 soniyadan keyin avtomatik o'chiriladi</i>",
+        auto_delete_after=20,
     )
 
 async def monitor_ake_trade(session, price):
@@ -4624,16 +4661,12 @@ async def scanner_loop(app):
             price = status["price"]
             cl15 = status["cl15"]
 
-            # ==================== A) AKE SIGNALS 7 (1M SCALPING) ALOHIDA MOTORI ====================
+            # ==================== A) AKE SIGNALS 7 (1M SCALPING) [BIRLASHTIRILGAN TAHLIL] ====================
             ake_enabled = await db.state_get("ake_enabled", AKE_ENABLED_DEFAULT)
             if ake_enabled:
                 try:
-                    c1_raw = await fetch_ohlcv(session, "1m", limit=AKE_LIMIT)
-                    cl1_ake = closed_only(c1_raw)
-                    _LAST_CANDLES_1M = cl1_ake
-                    recent_ake_list = await db.get_recent_ake_trades(limit=1)
-                    last_closed_ake = recent_ake_list[0] if recent_ake_list else None
-                    ake_info = analyze_ake_1m_scalp(cl1_ake, cl15, price, last_closed_ake=last_closed_ake)
+                    cl1_ake = status.get("cl1") or closed_only(await fetch_ohlcv(session, "1m", limit=AKE_LIMIT))
+                    ake_info = status.get("ake_info") or analyze_ake_1m_scalp(cl1_ake, cl15, price)
                     _LAST_AKE_INFO = ake_info
 
                     ake_trade = await db.state_get("current_trade_ake")
@@ -4757,7 +4790,9 @@ async def scanner_loop(app):
                                 f"{'✅' if flip_pnl > 0 else ('❌' if flip_pnl < 0 else '➖')} "
                                 f"<b>{side_txt(trade['signal'])} yopildi</b> — {html.escape(result_txt(close_lbl))}\n"
                                 f"Narx: <code>{price}</code> | Natija: <b>{flip_pnl:+.2f}$</b> ({flip_r:+.2f}R)\n"
-                                f"💰 Balans: <b>${flip_bal:.2f}</b>",
+                                f"💰 Balans: <b>${flip_bal:.2f}</b>\n"
+                                f"<i>⏱ Chat toza turishi uchun xabar 20 soniyadan keyin avtomatik o'chiriladi</i>",
+                                auto_delete_after=20,
                             )
                         upd_daily = await increment_daily_signal_count()
                         cand["daily_count"] = upd_daily["count"]
@@ -4859,8 +4894,10 @@ async def handle_command(session, chat_id, text, message_id=None):
         cmd = "/ai"
     elif raw_text == "🏦 Exness Hisoblar":
         cmd = "/exness"
-    elif raw_text == "🎯 Zonalar":
+    elif raw_text in ("🎯 Zonalar", "🎯 Day Zonalar"):
         cmd = "/zones"
+    elif raw_text in ("📏 Ake Zonalar", "📏 Zonalar"):
+        cmd = "/ake_zones"
 
     if cmd in ("/start", "/help"):
         msg = (
@@ -4887,8 +4924,11 @@ async def handle_command(session, chat_id, text, message_id=None):
         cl15_ake = closed_only(c15_raw)
         p_now = get_unified_price(c1_raw)
         ake_info = analyze_ake_1m_scalp(cl1_ake, cl15_ake, p_now)
-        if cmd == "/ake_zones":
-            await send_telegram(session, format_ake_zones_block(ake_info, p_now), with_keyboard=True, chat_id=cid)
+        if cmd in ("/ake_zones", "/ake_zonalar"):
+            if message_id:
+                _spawn(_delayed_delete_telegram_message(session, cid, message_id, delay_sec=20))
+            ake_z_msg = format_ake_zones_block(ake_info, p_now) + "\n\n<i>⏱ Chat toza turishi uchun xabar 20 soniyadan keyin avtomatik o'chiriladi</i>"
+            await send_telegram(session, ake_z_msg, with_keyboard=True, chat_id=cid, auto_delete_after=20)
             return
         ake_trade = await db.state_get("current_trade_ake")
         ake_en = await db.state_get("ake_enabled", AKE_ENABLED_DEFAULT)
@@ -4912,14 +4952,15 @@ async def handle_command(session, chat_id, text, message_id=None):
         await send_telegram(session, "\n".join(lines), with_keyboard=True, chat_id=cid)
 
     elif cmd == "/ake_chart":
-        c1_raw, c15_raw = await asyncio.gather(
-            fetch_ohlcv(session, "1m", limit=AKE_LIMIT),
-            fetch_ohlcv(session, "15m", limit=LIMIT),
-        )
-        cl1_ake = closed_only(c1_raw)
-        cl15_ake = closed_only(c15_raw)
-        p_now = get_unified_price(c1_raw)
-        ake_info = analyze_ake_1m_scalp(cl1_ake, cl15_ake, p_now)
+        if message_id:
+            _spawn(_delayed_delete_telegram_message(session, cid, message_id, delay_sec=20))
+        status = await analyze_gold_market(session, run_deep_scoring=False)
+        cl1_ake = status.get("cl1")
+        if not cl1_ake:
+            c1_raw = await fetch_ohlcv(session, "1m", limit=AKE_LIMIT)
+            cl1_ake = closed_only(c1_raw)
+        p_now = status["price"]
+        ake_info = status.get("ake_info") or analyze_ake_1m_scalp(cl1_ake, status["cl15"], p_now)
         ake_trade = await db.state_get("current_trade_ake") or ake_info.get("candidate")
         ake_stats = await get_ake_stats_summary()
         png = await render_ake_chart_async(
@@ -4929,15 +4970,18 @@ async def handle_command(session, chat_id, text, message_id=None):
         if png:
             d_st = ake_stats["day"]
             cap = (
-                f"⚡ <b>Ake signals 7 · 1m XAUUSD</b> | Narx: <code>{p_now:.2f}</code>\n"
+                f"⚡ <b>Ake signals 7 · 1m Skalp Grafik</b> | Narx: <code>{p_now:.2f}</code>\n"
                 f"Kun: {d_st['total']} bitim | TP olindi: {d_st['wins']} ({d_st['wr']}%) | "
-                f"Stop -1R: {d_st['losses']} | Jami: <b>{d_st['total_r']:+.1f}R</b>"
+                f"Stop -1R: {d_st['losses']} | Jami: <b>{d_st['total_r']:+.1f}R</b>\n"
+                f"<i>⏱ Chat toza turishi uchun xabar 20 soniyadan keyin avtomatik o'chiriladi</i>"
             )
-            await send_telegram_photo(session, png, caption=cap, chat_id=cid)
+            await send_telegram_photo(session, png, caption=cap, chat_id=cid, auto_delete_after=20)
         else:
-            await send_telegram(session, "⚠️ 1m Ake grafik chizish uchun shamlar yetarli emas.", chat_id=cid)
+            await send_telegram(session, "⚠️ 1m Ake grafik chizish uchun shamlar yetarli emas.", chat_id=cid, auto_delete_after=20)
 
     elif cmd in ("/ake_stats", "/ake_stat"):
+        if message_id:
+            _spawn(_delayed_delete_telegram_message(session, cid, message_id, delay_sec=20))
         msg = await format_ake_stats_table_message()
         recent_ake = await db.get_recent_ake_trades(limit=8)
         if recent_ake:
@@ -4947,7 +4991,8 @@ async def handle_command(session, chat_id, text, message_id=None):
                     f"\n • <b>{side_txt(r['signal'])}</b> | {html.escape(str(r['result']))} | "
                     f"<code>{r['entry']:.2f} ➡️ {r['close_price']:.2f}</code> (Rekord: <b>{r['peak_r']:+.1f}R</b>)"
                 )
-        await send_telegram(session, msg, with_keyboard=True, chat_id=cid)
+        msg += "\n\n<i>⏱ Chat toza turishi uchun xabar 20 soniyadan keyin avtomatik o'chiriladi</i>"
+        await send_telegram(session, msg, with_keyboard=True, chat_id=cid, auto_delete_after=20)
 
     elif cmd == "/ake_reset":
         async with _ake_monitor_lock:
@@ -5010,9 +5055,11 @@ async def handle_command(session, chat_id, text, message_id=None):
         await send_telegram(session, msg, with_keyboard=True, chat_id=cid)
 
     elif cmd == "/chart":
+        if message_id:
+            _spawn(_delayed_delete_telegram_message(session, cid, message_id, delay_sec=20))
         now_m = time.monotonic()
         if now_m - _chart_last.get(cid, 0) < CHART_COOLDOWN_SEC:
-            await send_telegram(session, "⏳ Grafik uchun biroz kuting (10s cooldown).", chat_id=cid)
+            await send_telegram(session, "⏳ Grafik uchun biroz kuting (10s cooldown).", chat_id=cid, auto_delete_after=20)
             return
         _bounded_set(_chart_last, cid, now_m)
         status = await analyze_gold_market(session, run_deep_scoring=False)
@@ -5020,32 +5067,28 @@ async def handle_command(session, chat_id, text, message_id=None):
         png = await render_chart_async(status["cl15"], status["zones15"], status["struct15"], trade=trade)
         if png:
             cap = (
-                f"🖼 <b>XAUUSD 15m SMC Grafik</b> | Narx: <code>{status['price']}</code>\n"
+                f"🖼 <b>XAUUSD 15m Day Trading SMC Grafik</b> | Narx: <code>{status['price']}</code>\n"
                 f"15m Bias: <b>{status['b15']}</b> | EQ(50%): <code>{status['eq15']}</code> | "
-                f"PDH/PDL: <code>{status['pdh']}</code> / <code>{status['pdl']}</code>"
+                f"PDH/PDL: <code>{status['pdh']}</code> / <code>{status['pdl']}</code>\n"
+                f"<i>⏱ Chat toza turishi uchun xabar 20 soniyadan keyin avtomatik o'chiriladi</i>"
             )
-            await send_telegram_photo(session, png, caption=cap, chat_id=cid)
+            await send_telegram_photo(session, png, caption=cap, chat_id=cid, auto_delete_after=20)
         else:
-            await send_telegram(session, "⚠️ Grafik chizish uchun yetarli shamlar yo'q.", chat_id=cid)
+            await send_telegram(session, "⚠️ Grafik chizish uchun yetarli shamlar yo'q.", chat_id=cid, auto_delete_after=20)
 
-    elif cmd in ("/zones", "/zonalar"):
-        status, c1_raw = await asyncio.gather(
-            analyze_gold_market(session, run_deep_scoring=False),
-            fetch_ohlcv(session, "1m", limit=AKE_LIMIT),
-        )
+    elif cmd in ("/zones", "/zonalar", "/day_zones"):
+        if message_id:
+            _spawn(_delayed_delete_telegram_message(session, cid, message_id, delay_sec=20))
+        status = await analyze_gold_market(session, run_deep_scoring=False)
         zones = status["zones15"]
         p = status["price"]
-        cl1_z = closed_only(c1_raw)
-        ake_z_info = analyze_ake_1m_scalp(cl1_z, status["cl15"], p)
         bull_z = [z for z in zones if z["type"] == "bullish"]
         bear_z = [z for z in zones if z["type"] == "bearish"]
         bull_z.sort(key=lambda z: abs(p - z["ce"]))
         bear_z.sort(key=lambda z: abs(p - z["ce"]))
 
         lines = [
-            format_ake_zones_block(ake_z_info, p),
-            "",
-            f"📊 <b>Day Trading (15m) Zonalar (Narx: <code>{p:.2f}</code>):</b>",
+            f"🎯 <b>Day Trading (15m SMC) Zonalar (Narx: <code>{p:.2f}</code>):</b>",
             f"🟢 <b>15m BUY zonalari (pastda):</b>",
         ]
         for z in bull_z[:5]:
@@ -5072,7 +5115,8 @@ async def handle_command(session, chat_id, text, message_id=None):
                     f"<code>{z['bottom']:.2f} — {z['top']:.2f}</code> (CE: {z['ce']:.2f})"
                 )
 
-        await send_telegram(session, "\n".join(lines), chat_id=cid)
+        lines.append("\n<i>⏱ Chat toza turishi uchun xabar 20 soniyadan keyin avtomatik o'chiriladi</i>")
+        await send_telegram(session, "\n".join(lines), with_keyboard=True, chat_id=cid, auto_delete_after=20)
 
     elif cmd == "/exness":
         msg = await format_exness_menu(cid)
@@ -5225,12 +5269,13 @@ async def handle_command(session, chat_id, text, message_id=None):
             cur_p = live_price() or (_LAST_CANDLES_15M[-1][C] if _LAST_CANDLES_15M else trade["entry"])
             await close_trade(session, trade, "MANUAL", round(cur_p, 2))
 
-    elif cmd == "/stats":
+    elif cmd in ("/stats", "/day_stat", "/stat"):
+        if message_id:
+            _spawn(_delayed_delete_telegram_message(session, cid, message_id, delay_sec=20))
         wr_txt = await win_rate_text()
         recent = await db.get_recent_trades(limit=10)
-        uptime_h = (time.time() - _metrics["start"]) / 3600.0
         lines = [
-            f"📈 <b>Natijalar</b>",
+            f"📈 <b>Day Trading (15m SMC) Natijalari</b>",
             f"🏆 {html.escape(wr_txt)}",
             f"💰 Balans: <b>${(await get_account())['balance']:.2f}</b>",
             f"",
@@ -5244,7 +5289,8 @@ async def handle_command(session, chat_id, text, message_id=None):
                     f" • <b>{side_txt(t['signal'])}</b> | {html.escape(result_txt(t['result']))} | "
                     f"<code>{t['entry']} ➡️ {t['close_price']}</code>"
                 )
-        await send_telegram(session, "\n".join(lines), chat_id=cid)
+        lines.append("\n<i>⏱ Chat toza turishi uchun xabar 20 soniyadan keyin avtomatik o'chiriladi</i>")
+        await send_telegram(session, "\n".join(lines), with_keyboard=True, chat_id=cid, auto_delete_after=20)
 
     elif cmd == "/model":
         if len(parts) >= 2:
