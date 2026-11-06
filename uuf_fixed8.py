@@ -1,5 +1,5 @@
 """
-GOLD (EXNESS / XM / XAUUSD) SMC + ICT Bot — v20 DUAL ENGINE (Ake Signals 7 [1m] + Day Trading [15m] ALOHIDA)
+GOLD (EXNESS / XM / XAUUSD) SMC + ICT Bot — v22 DUAL ENGINE (Ake Signals 7 [1m] + Day Trading [15m] ALOHIDA)
 ========================================================================
 v16 TITANIUM FIXED va v18 TITANIUM ning to'liq birlashtirilgan, dublikatlardan
 tozalangan yakuniy versiyasi:
@@ -151,12 +151,12 @@ DAY_ENABLED_DEFAULT = True
 AKE_TF = "1m"
 AKE_LIMIT = 240
 AKE_MIN_SL_POINTS = 1.60           # 1m scalp minimal SL (1R) masofasi ($)
-AKE_MAX_SL_POINTS = 2.85           # 1m scalp optimal maksimal SL (1R) masofasi ($), 3.80$ cho'zilib ketmasligi uchun
-AKE_SKIP_IF_SL_OVER = 3.20         # Agar 1m sham juda katta bo'lib SL > 3.20$ bo'lsa, xavfli sham o'tkazib yuboriladi
+AKE_MAX_SL_POINTS = 3.20           # 1m scalp optimal maksimal SL (1R) masofasi ($)
+AKE_SKIP_IF_SL_OVER = 3.85         # Agar 1m sham juda katta bo'lib SL > 3.85$ bo'lsa, xavfli sham o'tkazib yuboriladi
 AKE_ATR_SL_MULT = 1.20             # 1m ATR ko'paytmasi (1R hisoblash uchun)
 AKE_TP_R_LEVELS = (1.0, 2.0, 3.0, 4.0, 5.0)  # TP1=1R, TP2=2R, TP3=3R, TP4=4R, TP5=5R
-AKE_COOLDOWN_SEC = 600             # 1m Ake signallar orasida minimal kutish (10 daqiqa, shovqinni kesish uchun)
-AKE_FLIP_AFTER_TP1_MIN_SEC = 600   # Faqat TP1 olingandan keyin va kamida 10 daq o'tgach teskari impulsga ruxsat
+AKE_COOLDOWN_SEC = 240             # 1m Ake signallar orasida minimal kutish (4 daqiqa — yangi LH/HL to'lqinni o'tkazib yubormaslik uchun)
+AKE_FLIP_AFTER_TP1_MIN_SEC = 480   # Faqat TP1 olingandan keyin va kamida 8 daq o'tgach teskari impulsga ruxsat
 AKE_ASIA_START_HOUR_UTC = 18       # AsiaSessionHigh/Low 18:00 - 02:00
 AKE_ASIA_END_HOUR_UTC = 2
 EXNESS_AUTOTRADE_DEFAULT_MODE = "day"  # "day" | "ake" | "both"
@@ -282,7 +282,6 @@ DEFAULT_PRICE_OFFSET = float(os.environ.get("PRICE_OFFSET", "-8.21"))
 _CURRENT_OFFSET = DEFAULT_PRICE_OFFSET
 _ACTIVE_BROKER = os.environ.get("ACTIVE_BROKER", "exness").strip().lower()  # "exness" | "xm"
 _AUTO_SYNC_ENABLED = os.environ.get("AUTO_SYNC_ENABLED", "1").strip() != "0"
-# Exness (XAUUSDm) va XM (GOLD) ning Spot XAU/USD ga nisbatan spred/kotirovka korreksiyasi ($)
 _BROKER_CALIBRATION = {"exness": 0.00, "xm": 0.25}
 _LAST_SPOT_SYNC_INFO = {
     "spot_raw": None,
@@ -573,7 +572,6 @@ class DatabaseManager:
                 rows = await cur.fetchall()
                 return [r[0] for r in rows]
 
-    # ---------- Ake Signals 7 (1m Scalping) Alohida DB Metodlari ----------
     async def insert_ake_trade(
         self, trade, result, close_price, max_r_hit, peak_r, rule_r, lot, risk_usd, reason=""
     ):
@@ -839,89 +837,6 @@ def _mt5_resolve_gold_symbol(preferred="XAUUSDm"):
             return sym
     return preferred
 
-# ---------- MetaApi Cloud REST Engine (Railway Linux & Android Termux uchun bepul/to'g'ridan-to'g'ri MT5 savdo) ----------
-METAAPI_REGIONS = (
-    "https://mt-client-api-v1.agiliumtrade.agiliumtrade.ai",
-    "https://mt-client-api-v1.london.agiliumtrade.ai",
-    "https://mt-client-api-v1.new-york.agiliumtrade.ai",
-    "https://mt-client-api-v1.singapore.agiliumtrade.ai",
-)
-
-async def _metaapi_request(session, token, account_id, method, subpath, payload=None):
-    headers = {"auth-token": token, "Content-Type": "application/json"}
-    last_err = None
-    for base_url in METAAPI_REGIONS:
-        url = f"{base_url}/users/current/accounts/{account_id}{subpath}"
-        try:
-            async with session.request(method, url, json=payload, headers=headers, timeout=T(12)) as r:
-                if r.status in (200, 201, 204):
-                    if r.status == 204:
-                        return {"ok": True}
-                    data = await r.json(content_type=None)
-                    return {"ok": True, "data": data, "base_url": base_url}
-                txt = (await r.text())[:250]
-                last_err = f"HTTP {r.status}: {txt}"
-                if r.status in (401, 403):
-                    break
-        except Exception as e:
-            last_err = str(e)
-    return {"ok": False, "msg": last_err or "MetaApi ulanish xatosi"}
-
-async def metaapi_open_order(session, token, account_id, side, lot, sl, tp, symbol="XAUUSDm"):
-    action_type = "ORDER_TYPE_BUY" if side == "LONG" else "ORDER_TYPE_SELL"
-    payload = {
-        "actionType": action_type,
-        "symbol": symbol,
-        "volume": round(float(lot), 2),
-        "stopLoss": round(float(sl), 2),
-        "takeProfit": round(float(tp), 2),
-        "comment": "SMC_v21_Auto",
-    }
-    res = await _metaapi_request(session, token, account_id, "POST", "/trade", payload)
-    if res.get("ok"):
-        d = res.get("data") or {}
-        retcode = d.get("numericCode") or d.get("stringCode") or "DONE"
-        if d.get("stringCode") in ("TRADE_RETCODE_DONE", "ERR_NO_ERROR", None) or d.get("numericCode") in (10009, 0, None):
-            return {
-                "ok": True,
-                "ticket": d.get("orderId") or d.get("positionId") or "MetaApi",
-                "price": d.get("openPrice") or sl,
-                "sl": round(float(sl), 2),
-                "tp": round(float(tp), 2),
-                "symbol": symbol,
-            }
-        return {"ok": False, "msg": f"MetaApi rad etdi ({retcode}): {d.get('message', '')}"}
-    return res
-
-async def metaapi_modify_or_close(session, token, account_id, action="close", new_sl=None):
-    pos_res = await _metaapi_request(session, token, account_id, "GET", "/positions")
-    if not pos_res.get("ok"):
-        return pos_res
-    positions = pos_res.get("data") or []
-    count = 0
-    for pos in positions:
-        pos_id = pos.get("id")
-        sym = pos.get("symbol")
-        if not pos_id:
-            continue
-        if action == "close":
-            r = await _metaapi_request(session, token, account_id, "POST", "/trade", {
-                "actionType": "POSITION_CLOSE_ID",
-                "positionId": str(pos_id),
-            })
-            if r.get("ok"):
-                count += 1
-        elif action == "modify_sl" and new_sl is not None:
-            r = await _metaapi_request(session, token, account_id, "POST", "/trade", {
-                "actionType": "POSITION_MODIFY",
-                "positionId": str(pos_id),
-                "stopLoss": round(float(new_sl), 2),
-                "takeProfit": pos.get("takeProfit"),
-            })
-            if r.get("ok"):
-                count += 1
-    return {"ok": True, "count": count}
-
 def _mt5_test_login_sync(login_id, password, server):
     """Avto-server aniqlash bilan kuchaytirilgan Exness MT5 ulanish tekshiruvi."""
     if not _HAS_MT5:
@@ -1100,84 +1015,28 @@ async def test_exness_account(acc):
 
 async def execute_exness_autotrades(session, trade):
     accounts = await db.get_all_active_exness_accounts()
-    tp_target = trade.get("tp5") or trade.get("tp2") or trade["tp1"]
+    if not accounts:
+        return
+
+    tp_target = trade.get("tp2") or trade["tp1"]
     if len(_BRIDGE_SIGNALS_QUEUE) >= 100:
         _BRIDGE_SIGNALS_QUEUE.pop(0)
     _BRIDGE_SIGNALS_QUEUE.append({
-        "id": f"sig_{int(time.time()*1000)}",
         "ts": int(time.time()),
-        "status": "pending",
-        "action": "OPEN",
-        "engine": trade.get("engine", "DAY_TRADING"),
         "signal": trade["signal"],
         "entry": trade["entry"],
         "sl": trade["sl"],
         "tp1": trade["tp1"],
         "tp2": tp_target,
-        "lot": trade.get("lot", XM_MIN_LOT),
     })
-
-    # Global MetaApi env bo'lsa va bazada hisob bo'lmasa ham ishlatish
-    meta_cfg = await db.state_get("metaapi_config")
-    if not meta_cfg and METAAPI_TOKEN_ENV and METAAPI_ACCOUNT_ID_ENV:
-        meta_cfg = {"token": METAAPI_TOKEN_ENV, "account_id": METAAPI_ACCOUNT_ID_ENV, "symbol": "XAUUSDm", "lot": XM_MIN_LOT}
-
-    if meta_cfg and meta_cfg.get("token") and meta_cfg.get("account_id"):
-        m_lot = meta_cfg.get("lot") or trade.get("lot") or XM_MIN_LOT
-        m_sym = meta_cfg.get("symbol") or ("GOLD" if _ACTIVE_BROKER == "xm" else "XAUUSDm")
-        m_res = await metaapi_open_order(
-            session, meta_cfg["token"], meta_cfg["account_id"],
-            trade["signal"], m_lot, trade["sl"], tp_target, symbol=m_sym
-        )
-        if m_res.get("ok"):
-            await send_telegram(
-                session,
-                f"✅ <b>[Cloud MT5 Auto-Trade] {side_txt(trade['signal'])} ochildi!</b>\n"
-                f"Simbol: <code>{html.escape(str(m_sym))}</code> | Lot: <code>{m_lot}</code> | "
-                f"SL: <code>{m_res.get('sl')}</code> | TP: <code>{m_res.get('tp')}</code>",
-            )
-        else:
-            await send_telegram(
-                session,
-                f"⚠️ <b>[Cloud MT5 Auto-Trade] xato:</b> {html.escape(str(m_res.get('msg')))}",
-            )
-
-    if not accounts:
-        return
 
     for acc in accounts:
         try:
             pw = decrypt_secret(acc["password_enc"])
         except Exception:
             continue
-        lot = acc.get("lot") or trade.get("lot") or XM_MIN_LOT
-        srv_str = str(acc.get("server") or "")
-        # Agar hisob MetaApi orqali ulangan bo'lsa (server == 'METAAPI' va login == account_id, pw == metaapi_token)
-        if srv_str.upper().startswith("METAAPI"):
-            m_res = await metaapi_open_order(
-                session, pw, acc["login"],
-                trade["signal"], lot, trade["sl"], tp_target,
-                symbol=acc.get("symbol", "XAUUSDm"),
-            )
-            if m_res.get("ok"):
-                await db.update_exness_status(
-                    acc["chat_id"], acc["slot"],
-                    status_text=f"MetaApi Ochiq #{m_res.get('ticket')} ({side_txt(trade['signal'])})",
-                )
-                await send_telegram(
-                    session,
-                    f"✅ <b>Exness/XM #{acc['slot']} (Cloud): {side_txt(trade['signal'])} ochildi</b>\n"
-                    f"Lot: <code>{lot}</code> | SL: <code>{m_res.get('sl')}</code> | TP: <code>{m_res.get('tp')}</code>",
-                    chat_id=acc["chat_id"],
-                )
-            else:
-                await db.update_exness_status(acc["chat_id"], acc["slot"], status_text=m_res.get("msg", "Xato"))
-                await send_telegram(
-                    session,
-                    f"⚠️ <b>Exness/XM #{acc['slot']} Cloud xato:</b> {html.escape(str(m_res.get('msg')))}",
-                    chat_id=acc["chat_id"],
-                )
-        elif _HAS_MT5:
+        lot = acc.get("lot") or XM_MIN_LOT
+        if _HAS_MT5:
             async with _mt5_lock:
                 loop = asyncio.get_running_loop()
                 res = await loop.run_in_executor(
@@ -1210,49 +1069,23 @@ async def execute_exness_autotrades(session, trade):
         else:
             await db.update_exness_status(
                 acc["chat_id"], acc["slot"],
-                status_text=f"Bridge navbatida: {side_txt(trade['signal'])} @ {trade['entry']}",
+                status_text=f"Signal: {side_txt(trade['signal'])} @ {trade['entry']}",
             )
 
 async def sync_exness_positions_action(action="close", new_sl=None):
-    # Bridge queue ga ham SL o'zgarishi yoki CLOSE buyrug'ini qo'shamiz (Termux / EA bridge uchun)
-    if len(_BRIDGE_SIGNALS_QUEUE) >= 100:
-        _BRIDGE_SIGNALS_QUEUE.pop(0)
-    _BRIDGE_SIGNALS_QUEUE.append({
-        "id": f"act_{int(time.time()*1000)}",
-        "ts": int(time.time()),
-        "status": "pending",
-        "action": "CLOSE" if action == "close" else "MODIFY_SL",
-        "new_sl": new_sl,
-    })
-
-    meta_cfg = await db.state_get("metaapi_config")
-    if not meta_cfg and METAAPI_TOKEN_ENV and METAAPI_ACCOUNT_ID_ENV:
-        meta_cfg = {"token": METAAPI_TOKEN_ENV, "account_id": METAAPI_ACCOUNT_ID_ENV}
-
-    accounts = await db.get_all_active_exness_accounts()
-    if not _HAS_MT5 and not meta_cfg and not any(str(a.get("server", "")).upper().startswith("METAAPI") for a in accounts):
+    if not _HAS_MT5:
         return
-
-    async with aiohttp.ClientSession() as tmp_sess:
-        if meta_cfg and meta_cfg.get("token") and meta_cfg.get("account_id"):
-            try:
-                await metaapi_modify_or_close(tmp_sess, meta_cfg["token"], meta_cfg["account_id"], action=action, new_sl=new_sl)
-            except Exception as e:
-                logger.warning(f"MetaApi {action} xato: {_safe_log_error(e)}")
-
-        for acc in accounts:
-            try:
-                pw = decrypt_secret(acc["password_enc"])
-                if str(acc.get("server", "")).upper().startswith("METAAPI"):
-                    await metaapi_modify_or_close(tmp_sess, pw, acc["login"], action=action, new_sl=new_sl)
-                elif _HAS_MT5:
-                    async with _mt5_lock:
-                        loop = asyncio.get_running_loop()
-                        await loop.run_in_executor(
-                            None, _mt5_modify_or_close_sync, acc["login"], pw, acc["server"], action, new_sl
-                        )
-            except Exception as e:
-                logger.warning(f"Exness {action} xato ({acc['login']}): {_safe_log_error(e)}")
+    accounts = await db.get_all_active_exness_accounts()
+    for acc in accounts:
+        try:
+            pw = decrypt_secret(acc["password_enc"])
+            async with _mt5_lock:
+                loop = asyncio.get_running_loop()
+                await loop.run_in_executor(
+                    None, _mt5_modify_or_close_sync, acc["login"], pw, acc["server"], action, new_sl
+                )
+        except Exception as e:
+            logger.warning(f"Exness {action} xato ({acc['login']}): {_safe_log_error(e)}")
 
 # ==================== MEMORY CACHE ====================
 _LAST_CANDLES_15M = []
@@ -1789,11 +1622,6 @@ async def render_chart_async(candles, zones, struct_info, trade=None):
     )
 
 def render_ake_chart_png(candles_1m, ake_trade=None, ake_stats=None, scalp_band=None, zones_1m=None, width=820, height=520):
-    """TradingView 'Ake signals 7' 1m uslubidagi maxsus grafik:
-    - 1m shamlar + Scalp kanal chizig'i
-    - Yashil TP1..TP5 (1R..5R) va Qizil SL (-1R) qutilari + Long/Short yorlig'i
-    - Pastki chap burchakda 'Ake signals 7 · 1' (Den / Nedelya / Mesyats) R-statistika jadvali
-    """
     window = [list(c) for c in (candles_1m[-60:] if len(candles_1m) >= 60 else candles_1m)]
     if len(window) < 10:
         return None
@@ -1805,7 +1633,7 @@ def render_ake_chart_png(candles_1m, ake_trade=None, ake_stats=None, scalp_band=
         if uni_p < window[-1][L]:
             window[-1][L] = uni_p
 
-    bg_r, bg_g, bg_b = 245, 247, 250  # TradingView yorug' (light) foni (skrinshotdagi kabi)
+    bg_r, bg_g, bg_b = 245, 247, 250
     row_bytes = width * 3
     buf = bytearray([bg_r, bg_g, bg_b] * (width * height))
 
@@ -1875,7 +1703,6 @@ def render_ake_chart_png(candles_1m, ake_trade=None, ake_stats=None, scalp_band=
     def price_to_y(p):
         return int(margin_top + (p_max - p) / max(p_max - p_min, 0.01) * plot_h)
 
-    # Grid lines
     for i in range(7):
         gp = p_min + (p_max - p_min) * (i / 6.0)
         gy = price_to_y(gp)
@@ -1887,7 +1714,6 @@ def render_ake_chart_png(candles_1m, ake_trade=None, ake_stats=None, scalp_band=
     total_slots = n_bars + proj_bars
     step_x = plot_w / max(total_slots, 1)
 
-    # 1m SMC/ICT Zonalarni (OB, FVG, IFVG, FU, BB) chizish
     if zones_1m:
         start_idx_1m = max(0, len(candles_1m) - len(window))
         ref_p = window[-1][C]
@@ -1905,7 +1731,6 @@ def render_ake_chart_png(candles_1m, ake_trade=None, ake_stats=None, scalp_band=
             draw_hline(zy2, zx_start, zx_end, z_col, dashed=True)
             draw_text(zx_start + 3, min(zy1, zy2) + 2, z["kind"], z_col, scale=1)
 
-    # Draw Ake Signals 7 TP1..TP5 (green) & SL -1R (red) box starting from exact entry candle and projecting right
     if ake_trade:
         entry_bar_ts = ake_trade.get("bar_ts")
         entry_idx = n_bars - 1
@@ -1936,7 +1761,6 @@ def render_ake_chart_png(candles_1m, ake_trade=None, ake_stats=None, scalp_band=
             mark = " V" if max_hit >= idx_tp else ""
             draw_text(zx1 + 4, tpy - 9, f"TP{idx_tp} {tp_val:.2f} {idx_tp}R{mark}", (16, 125, 90), scale=1)
 
-        # Long / Short badge
         is_long = ake_trade["signal"] == "LONG"
         badge_col = (22, 150, 110) if is_long else (225, 55, 70)
         badge_txt = "BUY" if is_long else "SELL"
@@ -1944,7 +1768,6 @@ def render_ake_chart_png(candles_1m, ake_trade=None, ake_stats=None, scalp_band=
         fill_rect(zx1 + 6, by, zx1 + 48, by + 15, badge_col, alpha=0.95)
         draw_text(zx1 + 11, by + 4, badge_txt, (255, 255, 255), scale=1)
 
-    # Candlesticks
     candle_w = max(3, int(step_x * 0.64))
     for i, c in enumerate(window):
         cx = int(margin_left + (i + 0.5) * step_x)
@@ -1960,7 +1783,6 @@ def render_ake_chart_png(candles_1m, ake_trade=None, ake_stats=None, scalp_band=
             b_bot += 1
         fill_rect(cx - candle_w // 2, b_top, cx + candle_w // 2, b_bot, col)
 
-    # Header (Day Trading bilan 100% bir xil joriy narx)
     last_p = get_unified_price(window) or window[-1][C]
     brk_lbl = _ACTIVE_BROKER.upper()
     hdr = f"{brk_lbl} XAUUSD 1M | AKE SIGNALS 7 | PRICE: {last_p:.2f}"
@@ -1973,27 +1795,6 @@ def render_ake_chart_png(candles_1m, ake_trade=None, ake_stats=None, scalp_band=
     if sub_info:
         draw_text(margin_left, 28, " | ".join(sub_info), (170, 110, 20), scale=1)
 
-    # TradingView uslubidagi AsiaSessionHigh va AsiaSessionLow gorizontal chiziqlari (18:00 - 02:00)
-    ash = ake_trade.get("asia_high") if ake_trade else None
-    asl = ake_trade.get("asia_low") if ake_trade else None
-    if ash and p_min <= ash <= p_max:
-        ash_y = price_to_y(ash)
-        draw_hline(ash_y, margin_left, width - margin_right, (120, 95, 215), dashed=True)
-        draw_text(width - margin_right - 145, ash_y - 8, f"ASIA HIGH {ash:.2f}", (120, 95, 215), scale=1)
-    if asl and p_min <= asl <= p_max:
-        asl_y = price_to_y(asl)
-        draw_hline(asl_y, margin_left, width - margin_right, (120, 95, 215), dashed=True)
-        draw_text(width - margin_right - 140, asl_y + 3, f"ASIA LOW {asl:.2f}", (120, 95, 215), scale=1)
-
-    # Scalp Band kanal chiziqlari
-    if scalp_band:
-        sb_low, sb_high = scalp_band[0], scalp_band[1]
-        if p_min <= sb_high <= p_max:
-            draw_hline(price_to_y(sb_high), margin_left, width - margin_right, (215, 160, 45), dashed=True)
-        if p_min <= sb_low <= p_max:
-            draw_hline(price_to_y(sb_low), margin_left, width - margin_right, (215, 160, 45), dashed=True)
-
-    # Pastki chap burchakdagi O'zbekcha Ake signals 7 statistika jadvali
     if ake_stats:
         tx0, ty0 = margin_left + 4, height - 148
         tx1, ty1 = margin_left + 430, height - 18
@@ -2111,14 +1912,11 @@ SWISSQUOTE_XAU_URL = "https://forex-data-feed.swissquote.com/public-quotes/bboqu
 YAHOO_XAU_SPOT_URL = "https://query1.finance.yahoo.com/v8/finance/chart/XAUUSD=X"
 
 async def fetch_spot_xauusd_price(session):
-    """Exness (XAUUSDm) va XM (GOLD) foydalanadigan haqiqiy Spot XAU/USD interbank kotirovkasini olish."""
-    # 0-manba: Agar Termux Bridge ulangan bo'lsa, bevosita foydalanuvchining Exness/XM MT5 dagi jonli narxini oladi!
     if (time.time() - _TERMUX_BRIDGE_STATE.get("last_seen", 0)) <= 30:
         t_bid = _TERMUX_BRIDGE_STATE.get("bid")
         t_ask = _TERMUX_BRIDGE_STATE.get("ask")
         if t_bid and t_ask and float(t_bid) > 1000:
-            return round((float(t_bid) + float(t_ask)) / 2.0, 2), "Termux Live Exness/XM MT5" 
-    # 1-manba: Swissquote Interbank BBO Spot XAU/USD (Exness/XM LP kotirovkasi bilan 1:1)
+            return round((float(t_bid) + float(t_ask)) / 2.0, 2), "Termux Live Exness/XM MT5"
     try:
         async with session.get(SWISSQUOTE_XAU_URL, headers=HEADERS, timeout=T(7)) as r:
             if r.status == 200:
@@ -2132,8 +1930,6 @@ async def fetch_spot_xauusd_price(session):
                             return round((bid + ask) / 2.0, 2), "Swissquote Spot XAU/USD"
     except Exception:
         pass
-
-    # 2-manba: Yahoo Finance XAUUSD=X Spot
     try:
         async with session.get(YAHOO_XAU_SPOT_URL, params={"interval": "1m", "range": "1d"}, headers=HEADERS, timeout=T(7)) as r:
             if r.status == 200:
@@ -2144,11 +1940,9 @@ async def fetch_spot_xauusd_price(session):
                     return round(reg_p, 2), "Yahoo Spot XAUUSD"
     except Exception:
         pass
-
     return None, None
 
 async def run_auto_sync_once(session, force=False):
-    """Bybit XAUUSDT va haqiqiy Exness/XM Spot XAUUSD orasidagi farqni avtomatik hisoblab sinxronlaydi."""
     global _LAST_SPOT_SYNC_INFO
     if not _AUTO_SYNC_ENABLED and not force:
         return None
@@ -2158,19 +1952,15 @@ async def run_auto_sync_once(session, force=False):
             raw_bybit = await fetch_raw_price(session)
         except Exception:
             return None
-
     spot_p, src = await fetch_spot_xauusd_price(session)
     if spot_p is None:
         return None
-
     ex_cal = float(_BROKER_CALIBRATION.get("exness", 0.0))
     xm_cal = float(_BROKER_CALIBRATION.get("xm", 0.25))
     exness_p = round(spot_p + ex_cal, 2)
     xm_p = round(spot_p + xm_cal, 2)
-
     target_p = exness_p if _ACTIVE_BROKER == "exness" else xm_p
     new_off = round(target_p - raw_bybit, 2)
-
     _LAST_SPOT_SYNC_INFO = {
         "spot_raw": spot_p,
         "exness_price": exness_p,
@@ -2179,7 +1969,6 @@ async def run_auto_sync_once(session, force=False):
         "source": src,
         "ts": time.time(),
     }
-
     if force or abs(new_off - _CURRENT_OFFSET) >= 0.08:
         await apply_offset_change(new_off)
     return _LAST_SPOT_SYNC_INFO
@@ -3902,8 +3691,6 @@ async def analyze_gold_market(session, run_deep_scoring=True):
         # 2) Model 2: ICT Turtle Soup / Liquidity Sweep Reversal (PDH/PDL, Asia H/L yoki 15m Sweep + 5m CHoCH/MSS)
         # 3) Model 3: ICT Silver Bullet / 5m IFVG Intraday Scalp (5m bias + 1H/OrderFlow uyg'unligi)
         setup_trials = []
-        # 24 soatlik (96 sham) VA 6 soatlik (24 sham) diapazonga nisbatan narx qayerdaligi:
-        # Bu 4145 dan 4117 ga qulaganda 6 soatlik tubda (4117.86 da) kechikib SELL ochishni 100% bloklaydi!
         win_96 = cl15[-RANGE_LOOKBACK_15M:] if len(cl15) >= 30 else cl15
         ll_96 = min(c[L] for c in win_96)
         hh_96 = max(c[H] for c in win_96)
@@ -3921,14 +3708,10 @@ async def analyze_gold_market(session, run_deep_scoring=True):
         delta5_pre = order_flow_delta(cl5, 6)
         eq15_val = struct15.get("eq")
 
-        # 1) ENG PASTIDAN (TUBIDAN) SNIPER BUY:
-        # Narx so'nggi 6 soatlik diapazonning pastki 35% qismida (pos_24 <= 0.35) va EQ dan pastda bo'lishi shart!
         if pos_24 <= 0.35 and pos_96 <= 0.55 and (not eq15_val or price <= eq15_val):
             if has_bull_liq_raid and (b5 == "bullish" or delta5_pre > 0):
                 setup_trials.append(("bullish", "Sniper Bottom Entry (BUY)"))
 
-        # 2) ENG UCHIDAN (CHO'QQISIDAN) SNIPER SELL:
-        # Narx so'nggi 6 soatlik diapazonning yuqori 65% qismida (pos_24 >= 0.65) va EQ dan tepada bo'lishi shart!
         if pos_24 >= 0.65 and pos_96 >= 0.45 and (not eq15_val or price >= eq15_val):
             if has_bear_liq_raid and (b5 == "bearish" or delta5_pre < 0):
                 setup_trials.append(("bearish", "Sniper Top Entry (SELL)"))
@@ -4061,7 +3844,6 @@ async def analyze_gold_market(session, run_deep_scoring=True):
 
             daily_info = await get_daily_signal_info()
             daily_cnt = daily_info.get("count", 0)
-            # Kunlik limit olib tashlandi: nechta sifatli A/A+ (76+ ball) signal chiqsa hammasini beradi
             pacing_add = 0
 
             score = max(0, min(100, score))
@@ -4114,7 +3896,7 @@ def format_signal_message(trade, status, acc):
     tp_pts = abs(trade["tp1"] - trade["entry"])
     tp_usd = round((trade["lot"] / XM_MIN_LOT) * tp_pts * XM_OZ_PER_MIN_LOT, 2)
     lines = [
-        f"{side_icon(trade['signal'])} <b>[DAY TRADING 15m] GOLD {side_txt(trade['signal'])}</b> (#{trade.get('daily_count', 1)})",
+        f"{side_icon(trade['signal'])} <b>GOLD {side_txt(trade['signal'])}</b> (#{trade.get('daily_count', 1)})",
         f"Kirish: <code>{trade['entry']}</code>",
         f"SL: <code>{trade['sl']}</code> (-{trade['risk_usd']:.2f}$)",
         f"TP: <code>{trade['tp1']}</code> (+{tp_usd:.2f}$) | RR 1:{abs(trade['tp1'] - trade['entry']) / max(abs(trade['entry'] - trade['sl']), 0.01):.1f}",
@@ -4125,23 +3907,17 @@ def format_signal_message(trade, status, acc):
 async def format_status_message(status):
     acc = await get_account()
     trade = await db.state_get("current_trade")
-    ake_trade = await db.state_get("current_trade_ake")
     kz_txt = "faol" if status["in_killzone"] else "tinch"
     news_txt = f"⛔ {html.escape(status['news_title'])}" if status["news_blocked"] else "yo'q"
-    brk = _ACTIVE_BROKER.upper()
-    sync_st = "🟢 Avto-Sync" if _AUTO_SYNC_ENABLED else "⚪ Qo'lda"
-    ex_p = _LAST_SPOT_SYNC_INFO.get("exness_price") or status["price"]
-    xm_p = _LAST_SPOT_SYNC_INFO.get("xm_price") or round(status["price"] + 0.25, 2)
 
     lines = [
-        f"📊 <b>GOLD ({brk}): <code>{status['price']:.2f}</code></b> ({sync_st} | Offset: <code>{_CURRENT_OFFSET:+.2f}</code>)",
-        f"🏦 Exness: <code>{ex_p:.2f}</code> | 🏛 XM: <code>{xm_p:.2f}</code> | 📈 Bybit: <code>{(status.get('raw_bybit') or 0):.2f}</code>",
+        f"📊 <b>GOLD: {status['price']}</b>",
         f"Trend (LTF/MTF): 5m {trend_txt(status['b5'])} | 15m {trend_txt(status['b15'])} | 1H {trend_txt(status['b1h'])} | 4H {trend_txt(status['b4h'])}",
         f"Macro (1 Oy): 1D {trend_txt(status.get('b1d'))} | 1W {trend_txt(status.get('b1w'))} | 1M {trend_txt(status.get('b1m'))}",
         f"1 Oylik Diapazon: <code>{status.get('month_low')} — {status.get('month_high')}</code> (EQ 50%: <code>{status.get('month_eq')}</code>)",
-        f"Likvidlik: PDH/L <code>{status.get('pdh')}/{status.get('pdl')}</code> | PWH/L <code>{status.get('pwh')}/{status.get('pwl')}</code>",
+        f"Likvidlik: PDH/L <code>{status.get('pdh')}/{status.get('pdl')}</code> | PWH/L <code>{status.get('pwh')}/{status.get('pwl')}</code> | PMH/L <code>{status.get('pmh')}/{status.get('pml')}</code>",
         f"Sessiya: {status['session'].upper()} ({kz_txt}) | Yangilik: {news_txt}",
-        f"💰 <b>Umumiy Balans (Day + Ake): ${acc['balance']:.2f}</b>",
+        f"💰 Balans: <b>${acc['balance']:.2f}</b>",
     ]
 
     if trade:
@@ -4149,18 +3925,12 @@ async def format_status_message(status):
         pnl_usd, _ = calc_trade_pnl(trade, status["price"], lot)
         lines.extend([
             "",
-            f"{side_icon(trade['signal'])} <b>[Day Trading 15m] Ochiq: {side_txt(trade['signal'])}</b> @ <code>{trade['entry']}</code>",
-            f"SL: <code>{trade['sl']}</code> | TP: <code>{trade['tp1']}</code> | Hozir: <b>{pnl_usd:+.2f}$</b>",
+            f"{side_icon(trade['signal'])} <b>Ochiq: {side_txt(trade['signal'])}</b> @ <code>{trade['entry']}</code>",
+            f"SL: <code>{trade['sl']}</code> | TP: <code>{trade['tp1']}</code>",
+            f"Hozir: <b>{pnl_usd:+.2f}$</b>",
         ])
     else:
-        lines.append("📭 Day Trading (15m): ochiq bitim yo'q")
-
-    if ake_trade:
-        lines.extend([
-            "",
-            f"⚡ <b>[Ake Signals 7 · 1m] Ochiq: {side_txt(ake_trade['signal'])}</b> @ <code>{ake_trade['entry']}</code> (Max: {ake_trade.get('max_r_hit', 0)}R)",
-            f"SL: <code>{ake_trade['sl']}</code> | TP1: <code>{ake_trade['tp1']}</code> .. TP5: <code>{ake_trade['tp5']}</code>",
-        ])
+        lines.append("📭 Ochiq bitim yo'q")
     return "\n".join(lines)
 
 
@@ -4175,20 +3945,16 @@ def _calc_ema_series(closes, period):
     return ema
 
 def compute_ake_Asia_1800_0200(cl1, cl15=None):
-    """Skrinshot va videolardagi 'AsiaSessionHi... 1800-0200' darajalarini hisoblash (24-30 soatlik to'liq tarix bo'yicha)."""
     bars_to_check = []
     if cl15 and len(cl15) >= 20:
-        bars_to_check = cl15[-120:]  # 15m da 120 ta sham = 30 soatlik to'liq kunlik davr
+        bars_to_check = cl15[-120:]
     elif cl1 and len(cl1) >= 20:
-        bars_to_check = cl1[-720:]   # 1m da 720 ta sham = 12 soatlik davr
+        bars_to_check = cl1[-720:]
     if not bars_to_check:
         return None, None
 
-    # Eng so'nggi 18:00 - 02:00 sessiya shamlarini guruhlash
-    now_utc = datetime.datetime.now(datetime.timezone.utc)
     asia_sessions = []
     cur_session = []
-
     for c in bars_to_check:
         dt = datetime.datetime.fromtimestamp(c[0] / 1000.0, tz=datetime.timezone.utc)
         is_asia_hour = (dt.hour >= AKE_ASIA_START_HOUR_UTC or dt.hour < AKE_ASIA_END_HOUR_UTC)
@@ -4203,26 +3969,13 @@ def compute_ake_Asia_1800_0200(cl1, cl15=None):
 
     target_session = asia_sessions[-1] if asia_sessions else cur_session
     if len(target_session) >= 3:
-        h = max(c[H] for c in target_session)
-        l = min(c[L] for c in target_session)
-        return round(h, 2), round(l, 2)
-
-    # Zaxira: so'nggi 24 soat ichidagi barcha 18-02 shamlar
-    all_asia = [
-        c for c in bars_to_check
-        if (datetime.datetime.fromtimestamp(c[0] / 1000.0, tz=datetime.timezone.utc).hour >= AKE_ASIA_START_HOUR_UTC or
-            datetime.datetime.fromtimestamp(c[0] / 1000.0, tz=datetime.timezone.utc).hour < AKE_ASIA_END_HOUR_UTC)
-    ]
-    if len(all_asia) >= 3:
-        return round(max(c[H] for c in all_asia[-32:]), 2), round(min(c[L] for c in all_asia[-32:]), 2)
+        return round(max(c[H] for c in target_session), 2), round(min(c[L] for c in target_session), 2)
     return None, None
 
 def _compute_supertrend_1m(cl1, period=10, mult=2.2):
-    """TradingView Ake signals 7 uchun 1m ATR Supertrend (Scalp Trend) liniyasi va trend almashishi."""
     n = len(cl1)
     if n < period + 5:
         return None, None, False, False
-
     trs = [cl1[0][H] - cl1[0][L]]
     for i in range(1, n):
         trs.append(max(
@@ -4230,55 +3983,39 @@ def _compute_supertrend_1m(cl1, period=10, mult=2.2):
             abs(cl1[i][H] - cl1[i - 1][C]),
             abs(cl1[i][L] - cl1[i - 1][C]),
         ))
-
     upper_band = [0.0] * n
     lower_band = [0.0] * n
     trend = [1] * n
-
     for i in range(period, n):
         atr = sum(trs[i - period + 1:i + 1]) / period
         hl2 = (cl1[i][H] + cl1[i][L]) / 2.0
         basic_upper = hl2 + mult * atr
         basic_lower = hl2 - mult * atr
-
         if i == period:
             upper_band[i] = basic_upper
             lower_band[i] = basic_lower
             trend[i] = 1 if cl1[i][C] >= hl2 else -1
             continue
-
-        if basic_upper < upper_band[i - 1] or cl1[i - 1][C] > upper_band[i - 1]:
-            upper_band[i] = basic_upper
-        else:
-            upper_band[i] = upper_band[i - 1]
-
-        if basic_lower > lower_band[i - 1] or cl1[i - 1][C] < lower_band[i - 1]:
-            lower_band[i] = basic_lower
-        else:
-            lower_band[i] = lower_band[i - 1]
-
+        upper_band[i] = basic_upper if (basic_upper < upper_band[i - 1] or cl1[i - 1][C] > upper_band[i - 1]) else upper_band[i - 1]
+        lower_band[i] = basic_lower if (basic_lower > lower_band[i - 1] or cl1[i - 1][C] < lower_band[i - 1]) else lower_band[i - 1]
         if trend[i - 1] == -1 and cl1[i][C] > upper_band[i - 1]:
             trend[i] = 1
         elif trend[i - 1] == 1 and cl1[i][C] < lower_band[i - 1]:
             trend[i] = -1
         else:
             trend[i] = trend[i - 1]
-
     flipped_bull = (trend[-1] == 1 and trend[-2] == -1)
     flipped_bear = (trend[-1] == -1 and trend[-2] == 1)
     return trend[-1], (round(lower_band[-1], 2), round(upper_band[-1], 2)), flipped_bull, flipped_bear
 
 def analyze_ake_1m_scalp(cl1, cl5, price, last_closed_ake=None):
-    """Ake signals 7 (1m XAUUSD Scalping) — Yuqori aniqlikdagi 2-bosqichli tasdiq (Two-Step Sniper) motori:
-    1) Pichoqni havoda ushlamaslik (Anti-Knife-Catch):
-       - BUY uchun: avval 1m da pastki ekstremum (Liquidity Sweep / Pivot Low) shakllanib, so'ngra sham oldingi
-         shamning High va EMA9 darajasini yorib yuqoriga yopilishi (1m Micro-CHoCH) talab qilinadi.
-       - SELL uchun: avval 1m da yuqori ekstremum (Liquidity Sweep / Pivot High, masalan 4128.78) shakllanib,
-         keyin sham oldingi shamning Low va EMA9 darajasini buzib pastga yopilishi (masalan 4126.68) talab qilinadi.
-    2) Bir to'lqinda 2 marta yomon narxda kirmaslik (Anti-Exhaustion):
-       - SELL foydada yopilgach (masalan 4126.68 -> 4122.88), narx tepaga (kamida EMA21 ustiga) qaytmasdan turib,
-         pastdan (4122.09) yana SELL ochish qat'iyan bloklanadi.
-    3) SL (-1R) = 1.60$..2.85$ (agar sham juda cho'zilgan va SL > 3.20$ bo'lsa, signal o'tkazib yuboriladi).
+    """Ake signals 7 (1m XAUUSD Scalping) — 4-Modelli Institucional Motor:
+    Model A: 2-bosqichli Liquidity Grab + Reversal (18-shamlik High/Low yoki Osiyo H/L supurilishi)
+    Model B: Scalp Supertrend Flip + Impuls BOS
+    Model C: 1m/15m SMC/ICT Zona (OB / FVG / IFVG / FU / BB) Bounce
+    Model D: Lower High (LH) / Higher Low (HL) Trend Pullback Continuation (skrinshotdagi oq katak Setup:
+             narx tushgandan so'ng EMA21 / 35%-85% OTE zonagacha korreksiya qilib Lower High hosil qilganda va
+             EMA9 hamda oldingi sham Low'ini buzib pastga yopilganda SELL beradi!)
     """
     if not cl1 or len(cl1) < 55:
         return {"candidate": None, "scalp_band": None, "trend_1m": None}
@@ -4300,12 +4037,10 @@ def analyze_ake_1m_scalp(cl1, cl5, price, last_closed_ake=None):
 
     b_htf = confirmed_structure_bias(cl5, cache_key="XAU_15m_ref") if (cl5 and len(cl5) >= 20) else None
 
-    # Oxirgi 15-20 ta sham ekstremumlari (joriy va oldingi 2 ta shamdan tashqari)
     lookback_18 = cl1[-20:-2]
     swing_high_18 = max(c[H] for c in lookback_18)
     swing_low_18 = min(c[L] for c in lookback_18)
 
-    # 30 daqiqalik diapazon pozitsiyasi (cho'qqida BUY / tubda SELL ochmaslik uchun)
     win_30 = cl1[-30:]
     hh_30 = max(c[H] for c in win_30)
     ll_30 = min(c[L] for c in win_30)
@@ -4315,26 +4050,25 @@ def analyze_ake_1m_scalp(cl1, cl5, price, last_closed_ake=None):
     last = cl1[-1]
     prev = cl1[-2]
     prev2 = cl1[-3]
-    prev3 = cl1[-4]
     rng = max(last[H] - last[L], 0.01)
     body = abs(last[C] - last[O])
     avg_body_10 = sum(abs(c[C] - c[O]) for c in cl1[-12:-2]) / 10.0
 
     is_strong_bull_candle = (
         last[C] > last[O]
-        and body >= max(avg_body_10 * 1.15, atr1 * 0.40, 0.40)
-        and (last[H] - last[C]) <= body * 0.55
+        and body >= max(avg_body_10 * 1.10, atr1 * 0.38, 0.38)
+        and (last[H] - last[C]) <= body * 0.60
     )
     is_strong_bear_candle = (
         last[C] < last[O]
-        and body >= max(avg_body_10 * 1.15, atr1 * 0.40, 0.40)
-        and (last[C] - last[L]) <= body * 0.55
+        and body >= max(avg_body_10 * 1.10, atr1 * 0.38, 0.38)
+        and (last[C] - last[L]) <= body * 0.60
     )
 
     bull_fvg_1m = (last[L] > prev2[H]) and (prev[C] > prev[O])
     bear_fvg_1m = (last[H] < prev2[L]) and (prev[C] < prev[O])
 
-    # 1m va 15m SMC/ICT Zonalarni (OB, AC_OB, FVG, IFVG, FU, BB) aniqlash (/zones bilan bir xil mantiq)
+    # 1m va 15m SMC/ICT Zonalarni (OB, AC_OB, FVG, IFVG, FU, BB) aniqlash
     zones_1m = get_active_zones(cl1, cache_key="XAU_1m")
     zones_htf = get_active_zones(cl5, cache_key="XAU_15m") if (cl5 and len(cl5) >= 20) else []
     all_ake_zones = []
@@ -4352,7 +4086,6 @@ def analyze_ake_1m_scalp(cl1, cl5, price, last_closed_ake=None):
     bull_zones.sort(key=lambda z: abs(price - z["ce"]))
     bear_zones.sort(key=lambda z: abs(price - z["ce"]))
 
-    # Narx joriy shamda yoki oldingi shamda BUY yoki SELL zonasiga (OB/FVG/IFVG/FU/BB) tegdimi?
     zone_tol_1m = max(atr1 * 0.55, 0.85)
     active_bull_zone = next(
         (z for z in bull_zones if (z["bottom"] - zone_tol_1m) <= min(last[L], prev[L], price) <= (z["top"] + zone_tol_1m)),
@@ -4369,9 +4102,6 @@ def analyze_ake_1m_scalp(cl1, cl5, price, last_closed_ake=None):
         active_bear_zone and (active_bear_zone["bottom"] - zone_tol_1m) <= max(last[H], prev[H], price) <= (active_bear_zone["top"] + zone_tol_1m)
     )
 
-    # 2-BOSQICHLI REVERSAL TASDIG'I (Pichoqni havoda ushlamaslik uchun!):
-    # BUY uchun: oxirgi 3 ta sham ichida likvidlik supurilgan (sweep_low < swing_low_18) VA
-    # joriy sham yangi Low qilmasdan (yoki pin-bar bilan) oldingi shamning High hamda EMA9 ustida yopilishi shart!
     recent_3_low = min(last[L], prev[L], prev2[L])
     recent_3_high = max(last[H], prev[H], prev2[H])
 
@@ -4384,8 +4114,7 @@ def analyze_ake_1m_scalp(cl1, cl5, price, last_closed_ake=None):
         or (asia_h is not None and recent_3_high > asia_h)
     )
 
-    # 1) LONG (Buy) Ake Signal:
-    # A) Confirmed Liquidity Grab + Micro-CHoCH (pastki likvidlik olingach, 2-sham tasdig'i yoki kuchli Pin/Engulfing prev High/Body va EMA9 ustida yopilsa)
+    # Model A & B: Liquidity Grab Reversal va Supertrend Breakout
     bull_sweep_reversal = (
         is_strong_bull_candle
         and swept_low_recently
@@ -4399,7 +4128,6 @@ def analyze_ake_1m_scalp(cl1, cl5, price, last_closed_ake=None):
         and ((min(last[O], prev[C]) - ll_30) / max(hh_30 - ll_30, 1.0)) <= 0.55
         and prev_rsi <= 58.0 and cur_rsi <= 68.0
     )
-    # B) Confirmed Supertrend Flip + Pullback/Breakout (faqat o'rta/pastki diapazondan, cho'qqida >72% kirmaydi!)
     bull_trend_breakout = (
         is_strong_bull_candle
         and st_dir == 1
@@ -4410,8 +4138,6 @@ def analyze_ake_1m_scalp(cl1, cl5, price, last_closed_ake=None):
         and 48.0 <= cur_rsi <= 65.0
     )
 
-    # 2) SHORT (Sell) Ake Signal:
-    # A) Confirmed Liquidity Grab + Micro-CHoCH (yuqori likvidlik olingach, masalan 4128.78 dan keyin 4126.68 da pastga yorib yopilsa)
     bear_sweep_reversal = (
         is_strong_bear_candle
         and swept_high_recently
@@ -4425,7 +4151,6 @@ def analyze_ake_1m_scalp(cl1, cl5, price, last_closed_ake=None):
         and ((max(last[O], prev[C]) - ll_30) / max(hh_30 - ll_30, 1.0)) >= 0.45
         and prev_rsi >= 42.0 and cur_rsi >= 32.0
     )
-    # B) Confirmed Supertrend Flip + Breakdown (faqat o'rta/yuqori diapazondan, tubda <28% SELL kirmaydi!)
     bear_trend_breakout = (
         is_strong_bear_candle
         and st_dir == -1
@@ -4436,64 +4161,107 @@ def analyze_ake_1m_scalp(cl1, cl5, price, last_closed_ake=None):
         and 35.0 <= cur_rsi <= 52.0
     )
 
-    # C) SMC/ICT Zona (OB / FVG / IFVG / FU / BB) dan aniq impuls bilan qaytish
+    # Model C: SMC/ICT Zona (OB / FVG / IFVG / FU / BB) Bounce
     bull_zone_bounce = (
         touched_bull_zone
         and is_strong_bull_candle
         and last[C] > max(prev[O], prev[C])
         and last[C] >= ema9
-        and pos_30 <= 0.60
-        and prev_rsi <= 56.0 and cur_rsi <= 66.0
+        and pos_30 <= 0.62
+        and prev_rsi <= 58.0 and cur_rsi <= 68.0
     )
     bear_zone_bounce = (
         touched_bear_zone
         and is_strong_bear_candle
         and last[C] < min(prev[O], prev[C])
         and last[C] <= ema9
-        and pos_30 >= 0.40
-        and prev_rsi >= 44.0 and cur_rsi >= 34.0
+        and pos_30 >= 0.38
+        and prev_rsi >= 42.0 and cur_rsi >= 32.0
+    )
+
+    # Model D: TREND PULLBACK CONTINUATION — Lower High (LH) SELL va Higher Low (HL) BUY
+    # (Skrinshotdagi oq katak: 4073 -> 4057 tushishdan keyin 4068.50 gacha EMA21 ustiga chiqib Lower High hosil qilib pastga yorib yopilganda SELL!)
+    recent_5_high = max(c[H] for c in cl1[-6:])
+    recent_5_low = min(c[L] for c in cl1[-6:])
+    recent_15_low = min(c[L] for c in cl1[-18:-2])
+    recent_15_high = max(c[H] for c in cl1[-18:-2])
+    pullback_up_pts = recent_5_high - recent_15_low
+    pullback_dn_pts = recent_15_high - recent_5_low
+    peak_pos_30 = (recent_5_high - ll_30) / max(hh_30 - ll_30, 0.5)
+    trough_pos_30 = (recent_5_low - ll_30) / max(hh_30 - ll_30, 0.5)
+
+    bear_lh_pullback = (
+        is_strong_bear_candle
+        and (hh_30 - ll_30) >= max(atr1 * 2.0, 3.5)
+        and pullback_up_pts >= max(atr1 * 1.15, 2.0)
+        and 0.35 <= peak_pos_30 <= 0.96
+        and recent_5_high >= min(ema9, ema21) - 0.15
+        and last[C] <= ema9 + atr1 * 0.45
+        and last[C] < min(prev[O], prev[C])
+        and (last[C] < prev[L] or last[C] < prev2[L] or bear_fvg_1m)
+        and pos_30 >= 0.25
+        and 34.0 <= cur_rsi <= 64.0
+    )
+
+    bull_hl_pullback = (
+        is_strong_bull_candle
+        and (hh_30 - ll_30) >= max(atr1 * 2.0, 3.5)
+        and pullback_dn_pts >= max(atr1 * 1.15, 2.0)
+        and 0.04 <= trough_pos_30 <= 0.65
+        and recent_5_low <= max(ema9, ema21) + 0.15
+        and last[C] >= ema9 - atr1 * 0.45
+        and last[C] > max(prev[O], prev[C])
+        and (last[C] > prev[H] or last[C] > prev2[H] or bull_fvg_1m)
+        and pos_30 <= 0.75
+        and 36.0 <= cur_rsi <= 66.0
     )
 
     sig_side = None
     sig_reason = []
     matched_zone = None
-    if bull_sweep_reversal or bull_trend_breakout or bull_zone_bounce:
+    if bull_sweep_reversal or bull_trend_breakout or bull_zone_bounce or bull_hl_pullback:
         sig_side = "LONG"
         matched_zone = active_bull_zone
         if bull_sweep_reversal:
             sig_reason.append("Likvidlik supurildi + Qayrilish")
+        if bull_hl_pullback:
+            sig_reason.append("Higher Low (HL) Korreksiya + BOS")
         if bull_trend_breakout:
             sig_reason.append("Supertrend BOS impuls")
         if touched_bull_zone and active_bull_zone:
             sig_reason.append(f"{active_bull_zone.get('tf', '1m')} {active_bull_zone['kind']} zonadan")
-    elif bear_sweep_reversal or bear_trend_breakout or bear_zone_bounce:
+    elif bear_sweep_reversal or bear_trend_breakout or bear_zone_bounce or bear_lh_pullback:
         sig_side = "SHORT"
         matched_zone = active_bear_zone
         if bear_sweep_reversal:
             sig_reason.append("Likvidlik supurildi + Qayrilish")
+        if bear_lh_pullback:
+            sig_reason.append("Lower High (LH) Korreksiya + BOS")
         if bear_trend_breakout:
             sig_reason.append("Supertrend BOS impuls")
         if touched_bear_zone and active_bear_zone:
             sig_reason.append(f"{active_bear_zone.get('tf', '1m')} {active_bear_zone['kind']} zonadan")
 
-    # 3) ANTI-EXHAUSTION VA TAKRORIY KIRISH FILTRI:
-    # Agar oxirgi yopilgan Ake bitimi shu yo'nalishda bo'lsa va narx hali pullback qilmasdan
-    # undan yomonroq (cho'zilgan) narxda turgan bo'lsa (masalan SELL @ 4126.68 yopilgach SELL @ 4122.09), BLOKLANADI!
+    # 3) AQLLI ANTI-EXHAUSTION FILTRI (EMA21 yoki >=1.3x ATR korreksiya bo'lganda yangi SELL/BUY ga ruxsat beradi!)
     if sig_side and last_closed_ake:
         last_side = last_closed_ake.get("signal")
         last_entry = float(last_closed_ake.get("entry") or 0.0)
         last_max_r = int(last_closed_ake.get("max_r_hit") or 0)
-        if last_side == sig_side and last_entry > 0:
-            if sig_side == "SHORT" and last_max_r >= 1 and price < last_entry - 1.20 and pos_30 < 0.55:
-                sig_side = None
-            elif sig_side == "LONG" and last_max_r >= 1 and price > last_entry + 1.20 and pos_30 > 0.45:
-                sig_side = None
+        if last_side == sig_side and last_entry > 0 and last_max_r >= 1:
+            if sig_side == "SHORT":
+                has_fresh_pullback = (recent_5_high >= ema21 - 0.10) or (pullback_up_pts >= max(atr1 * 1.3, 2.2))
+                if not has_fresh_pullback and price < last_entry - 1.20 and pos_30 < 0.35:
+                    sig_side = None
+            elif sig_side == "LONG":
+                has_fresh_pullback = (recent_5_low <= ema21 + 0.10) or (pullback_dn_pts >= max(atr1 * 1.3, 2.2))
+                if not has_fresh_pullback and price > last_entry + 1.20 and pos_30 > 0.65:
+                    sig_side = None
 
     candidate = None
     if sig_side:
         entry = round(price, 2)
-        recent_low_4 = min(c[L] for c in cl1[-4:])
-        recent_high_4 = max(c[H] for c in cl1[-4:])
+        recent_low_4 = min(c[L] for c in cl1[-3:])
+        recent_high_4 = max(c[H] for c in cl1[-3:])
         atr_risk = round(atr1 * AKE_ATR_SL_MULT, 2)
 
         if sig_side == "LONG":
@@ -4503,7 +4271,6 @@ def analyze_ake_1m_scalp(cl1, cl5, price, last_closed_ake=None):
             structural_dist = (recent_high_4 + 0.18) - entry
             raw_sl_dist = max(structural_dist, atr_risk)
 
-        # Agar 1m strukturaviy SL juda katta (> 3.20$) bo'lsa, xavfli cho'zilgan shamga kirmaymiz!
         if raw_sl_dist <= AKE_SKIP_IF_SL_OVER:
             risk_1r = round(min(max(raw_sl_dist, AKE_MIN_SL_POINTS), AKE_MAX_SL_POINTS), 2)
             if sig_side == "LONG":
@@ -4521,7 +4288,6 @@ def analyze_ake_1m_scalp(cl1, cl5, price, last_closed_ake=None):
                 tp4 = round(entry - risk_1r * 4.0, 2)
                 tp5 = round(entry - risk_1r * 5.0, 2)
 
-            # 15m / 1H HTF SMC Zone bilan moslikni aniqlash
             htf_match_str = None
             if zones_htf:
                 for hz in zones_htf:
@@ -4596,7 +4362,6 @@ def _compute_ake_window_metrics(rows):
     }
 
 async def get_ake_stats_summary():
-    """TradingView 'Ake signals 7 · 1' jadvali uchun День / Неделя / Месяц ko'rsatkichlari."""
     now_utc = datetime.datetime.now(datetime.timezone.utc)
     uzt_cur = now_utc + UZT_OFFSET
     start_of_day_uzt = datetime.datetime(uzt_cur.year, uzt_cur.month, uzt_cur.day, tzinfo=datetime.timezone.utc) - UZT_OFFSET
@@ -4698,7 +4463,7 @@ def format_ake_signal_message(trade, balance=None):
         else f"🎯 Zona: <b>{html.escape(str(z_kind))}</b>"
     )
     if htf_conf:
-        zone_line += f"\n🏛 HTF Moslik: <b>{html.escape(str(htf_conf))}</b>" 
+        zone_line += f"\n🏛 HTF Moslik: <b>{html.escape(str(htf_conf))}</b>"
     lines = [
         f"⚡ <b>Ake signals 7 ({brk}) — {tag}</b> [1m Skalp]",
         f"Kirish (E): <code>{trade['entry']:.2f}</code> | Lot: <code>{lot:.2f}</code>{bal_txt}",
@@ -4714,7 +4479,6 @@ def format_ake_signal_message(trade, balance=None):
     return "\n".join(lines)
 
 async def close_ake_trade(session, trade, price, reason_label="SL"):
-    """Ake Signals 7 bitimini yopish va Kun/Hafta/Oy R-jadvaliga yozish (_ake_monitor_lock ichida chaqiriladi)."""
     max_hit = int(trade.get("max_r_hit", 0))
     entry = float(trade["entry"])
     risk_pts = max(float(trade.get("risk_pts", abs(entry - trade.get("initial_sl", trade["sl"])))), 0.01)
@@ -4726,7 +4490,8 @@ async def close_ake_trade(session, trade, price, reason_label="SL"):
         if reason_label == "TP5":
             rule_r = 5.0
         elif reason_label == "TRAIL_SL":
-            rule_r = float(max_hit - 1)
+            # TP1 olinganda +0.35R qulflangani uchun kamida +0.35R, TP2+ da esa max_hit - 1 R
+            rule_r = 0.35 if max_hit == 1 else float(max_hit - 1)
         else:
             rule_r = round(raw_r, 2)
         res_code = f"TP{max_hit} (+{peak_r:.1f}R)"
@@ -4757,8 +4522,6 @@ async def close_ake_trade(session, trade, price, reason_label="SL"):
     if ex_mode in ("ake", "both"):
         _spawn(sync_exness_positions_action(action="close"))
 
-    # Yagona umumiy balansni (Day Trading + Ake Signals 7) avto-yangilash!
-    # Agar TP1+ olingan bo'lsa, foyda = rekord TP R bo'yicha yoki trailing SL bo'yicha hisoblanadi
     effective_r_for_bal = peak_r if max_hit >= 1 else rule_r
     pnl_usd = round((float(lot) / XM_MIN_LOT) * (effective_r_for_bal * risk_pts) * XM_OZ_PER_MIN_LOT, 2)
     new_balance = await apply_pnl_to_balance(pnl_usd)
@@ -4775,7 +4538,6 @@ async def close_ake_trade(session, trade, price, reason_label="SL"):
     )
 
 async def monitor_ake_trade(session, price):
-    """Ake Signals 7 (1m) ochiq bitimini TP1..TP5 (1R..5R) va SL (-1R) bo'yicha real-vaqtda kuzatish."""
     if _ake_monitor_lock.locked():
         return
     async with _ake_monitor_lock:
@@ -4785,6 +4547,7 @@ async def monitor_ake_trade(session, price):
 
         is_long = trade["signal"] == "LONG"
         entry = float(trade["entry"])
+        risk_pts = max(float(trade.get("risk_pts", abs(entry - trade.get("initial_sl", trade["sl"])))), 0.01)
         max_hit = int(trade.get("max_r_hit", 0))
         changed = False
         notes = []
@@ -4792,7 +4555,6 @@ async def monitor_ake_trade(session, price):
         def reached(lvl):
             return price >= lvl if is_long else price <= lvl
 
-        # TP1..TP5 bosqichlarini tekshirish
         for k in range(1, 6):
             tp_lvl = float(trade[f"tp{k}"])
             if reached(tp_lvl) and max_hit < k:
@@ -4800,11 +4562,12 @@ async def monitor_ake_trade(session, price):
                 trade["max_r_hit"] = k
                 changed = True
                 if k == 1:
-                    # TP1 (1R) olindi -> SL Entry (0.0R Breakeven) ga ko'chadi
-                    trade["sl"] = entry
+                    # TP1 (+1.0R) olinganda SL 0.0R ga emas, +0.35R sof foydaga qulflanadi!
+                    lock_sl = round(entry + risk_pts * 0.35, 2) if is_long else round(entry - risk_pts * 0.35, 2)
+                    trade["sl"] = lock_sl
                     notes.append(
                         f"⚡ <b>[Ake signals 7 · 1m] {side_txt(trade['signal'])} TP1 (+1.0R) olindi ✓</b> "
-                        f"(<code>{tp_lvl:.2f}</code>) | SL ➡️ E (<code>{entry:.2f}</code> 0.0R)"
+                        f"(<code>{tp_lvl:.2f}</code>) | SL ➡️ <code>{lock_sl:.2f}</code> (+0.35R foyda qulflandi)"
                     )
                 elif k < 5:
                     prev_tp = float(trade[f"tp{k-1}"])
@@ -4822,10 +4585,11 @@ async def monitor_ake_trade(session, price):
                     )
 
         if max_hit >= 5 and reached(float(trade["tp5"])):
+            for n in notes:
+                await send_telegram(session, n)
             await close_ake_trade(session, trade, float(trade["tp5"]), reason_label="TP5")
             return
 
-        # SL tekshiruvi
         sl_lvl = float(trade["sl"])
         sl_hit = (is_long and price <= sl_lvl) or ((not is_long) and price >= sl_lvl)
         if sl_hit:
@@ -4869,7 +4633,7 @@ async def scanner_loop(app):
                     _LAST_CANDLES_1M = cl1_ake
                     recent_ake_list = await db.get_recent_ake_trades(limit=1)
                     last_closed_ake = recent_ake_list[0] if recent_ake_list else None
-                    ake_info = analyze_ake_1m_scalp(cl1_ake, status.get('cl15', []), price, last_closed_ake=last_closed_ake)
+                    ake_info = analyze_ake_1m_scalp(cl1_ake, cl15, price, last_closed_ake=last_closed_ake)
                     _LAST_AKE_INFO = ake_info
 
                     ake_trade = await db.state_get("current_trade_ake")
@@ -4883,9 +4647,6 @@ async def scanner_loop(app):
                         elapsed_since_ake = time.time() - last_ake_signal_time
                         ake_cd_ok = elapsed_since_ake >= AKE_COOLDOWN_SEC
 
-                        # MUHIM QOIDA: Ochiq Ake bitimi hali TP1 (+1R) ga yetmagan bo'lsa,
-                        # uni teskari signal (FLIP) bilan erta yopish QAT'IYAN TAQIQLANADI!
-                        # Bitim to'liq SL (-1R) yoki TP1..TP5 gacha ishlashi shart.
                         can_flip_after_tp1 = (
                             ake_trade is not None
                             and ake_cand["signal"] != ake_trade["signal"]
@@ -4905,7 +4666,7 @@ async def scanner_loop(app):
                                 last_ake_signal_time = time.time()
 
                             acc_ake = await get_account()
-                            ake_msg = format_ake_signal_message(ake_cand, balance=acc_ake['balance'])
+                            ake_msg = format_ake_signal_message(ake_cand, balance=acc_ake["balance"])
                             await send_telegram(session, ake_msg, with_keyboard=True)
 
                             ake_stats_now = await get_ake_stats_summary()
@@ -5015,10 +4776,8 @@ async def scanner_loop(app):
                                 caption=f"{side_icon(cand['signal'])} <b>{side_txt(cand['signal'])} @ {cand['entry']}</b> | SL: {cand['sl']} | TP: {cand['tp1']}",
                             )
 
-                        # Exness & Binance avto-savdo (Day Trading rejimi yoqilgan bo'lsa)
-                        ex_mode = await db.state_get("exness_mode", EXNESS_AUTOTRADE_DEFAULT_MODE)
-                        if ex_mode in ("day", "both"):
-                            _spawn(execute_exness_autotrades(session, dict(cand)))
+                        # Exness & Binance avto-savdo
+                        _spawn(execute_exness_autotrades(session, dict(cand)))
                         _spawn(execute_binance_autotrades(session, dict(cand)))
 
                         # Gemini AI sharhi
@@ -5066,7 +4825,7 @@ async def handle_command(session, chat_id, text, message_id=None):
         return
 
     # Parol yuborilgan xabarni darhol o'chirish himoyasi
-    if raw_text.lower().startswith(("/exness_add", "/binance_set", "/metaapi_set")) and message_id:
+    if raw_text.lower().startswith(("/exness_add", "/binance_set")) and message_id:
         await delete_telegram_message(session, cid, message_id)
 
     if not await is_allowed(cid):
@@ -5104,34 +4863,18 @@ async def handle_command(session, chat_id, text, message_id=None):
         cmd = "/zones"
 
     if cmd in ("/start", "/help"):
-        ake_en = await db.state_get("ake_enabled", AKE_ENABLED_DEFAULT)
-        day_en = await db.state_get("day_enabled", DAY_ENABLED_DEFAULT)
-        ex_m = await db.state_get("exness_mode", EXNESS_AUTOTRADE_DEFAULT_MODE)
         msg = (
-            "👑 <b>GOLD BOT v20 — 2 TA ALOHIDA TIZIM</b>\n\n"
-            f"📊 <b>1) DAY TRADING (15m/5m SMC+ICT Sniper)</b> [{'🟢 Yoqilgan' if day_en else '🔴 O`chirilgan'}]\n"
-            "• /signal yoki /day — Day Trading holati va ochiq bitimi\n"
-            "• /chart — 15m SMC Day Trading grafigi\n"
-            "• /stats — Day Trading statistikasi va Win Rate\n"
-            "• /close — Day Trading ochiq bitimini yopish\n"
-            "• /day_toggle — Day Trading avto-signalni yoqish/o'chirish\n\n"
-            f"⚡ <b>2) AKE SIGNALS 7 (1m Scalping 1R–5R)</b> [{'🟢 Yoqilgan' if ake_en else '🔴 O`chirilgan'}]\n"
-            "• /ake — Ake Signals 7 (1m) joriy holati va TP1–TP5 bitimi\n"
-            "• /ake_chart — 1m Ake Signals grafigi (TP1–TP5 + R-jadval)\n"
-            "• /ake_stats — День / Неделя / Месяц R-statistika jadvali\n"
-            "• /ake_close — Ake 1m ochiq bitimini qo'lda yopish\n"
-            "• /ake_toggle — Ake Signals 7 avto-signalni yoqish/o'chirish\n\n"
-            "⚙️ <b>UMUMIY VA EXNESS SOZLAMALAR:</b>\n"
-            f"• /exness_mode <code>day|ake|both</code> — Exness avto-savdo rejimi (hozir: <b>{ex_m.upper()}</b>)\n"
-            "• /zones — 15m/4H/1D kirish zonalari\n"
-            "• /balance <code>20</code> | /risk <code>15</code>\n"
-            "• /broker <code>exness|xm</code> — Exness yoki XM rejimini tanlash\n"
-            "• /autosync <code>on|off|now</code> — Avto-Sync (Spot XAU/USD)\n"
-            "• /sync_exness <code>4135.20</code> | /sync_xm <code>4135.45</code>\n"
-            "• /metaapi_set — Railway/Termux Cloud MT5 avto-savdo ulash\n"
-            "• /termux — Railway va Termux avto-savdo qo'llanmasi\n"
-            "• /ake_reset | /day_reset — Statistikani 0 ga tozalash\n"
-            "• /ai <code>[savol]</code> — Gemini AI tahlil"
+            "👑 <b>GOLD BOT</b>\n"
+            "• /signal — hozirgi holat\n"
+            "• /chart — grafik\n"
+            "• /zones — kirish zonalari\n"
+            "• /balance <code>20</code> — balansni o'rnatish (bitim yopilganda o'zi o'zgaradi)\n"
+            "• /risk <code>10</code> — risk foizi\n"
+            "• /close — ochiq bitimni yopish\n"
+            "• /stats — natijalar\n"
+            "• /exness — Exness hisoblar\n"
+            "• /sync <code>2915.40</code> — broker narxiga moslash\n"
+            "• /ai <code>[savol]</code> — AI tahlil"
         )
         await send_telegram(session, msg, with_keyboard=True, chat_id=cid)
 
@@ -5159,9 +4902,9 @@ async def handle_command(session, chat_id, text, message_id=None):
         if ake_trade:
             lines.append("")
             acc_ake = await get_account()
-            lines.append(format_ake_signal_message(ake_trade, balance=acc_ake['balance']))
+            lines.append(format_ake_signal_message(ake_trade, balance=acc_ake["balance"]))
         else:
-            lines.append("📭 Hozir ochiq 1m Ake bitim yo'q (yangi zona + impuls kutilmoqda)")
+            lines.append("📭 Hozir ochiq 1m Ake bitim yo'q (yangi zona + LH/HL impuls kutilmoqda)")
         lines.append("")
         lines.append(format_ake_zones_block(ake_info, p_now))
         lines.append("")
@@ -5169,14 +4912,19 @@ async def handle_command(session, chat_id, text, message_id=None):
         await send_telegram(session, "\n".join(lines), with_keyboard=True, chat_id=cid)
 
     elif cmd == "/ake_chart":
-        c1_raw = await fetch_ohlcv(session, "1m", limit=AKE_LIMIT)
+        c1_raw, c15_raw = await asyncio.gather(
+            fetch_ohlcv(session, "1m", limit=AKE_LIMIT),
+            fetch_ohlcv(session, "15m", limit=LIMIT),
+        )
         cl1_ake = closed_only(c1_raw)
+        cl15_ake = closed_only(c15_raw)
         p_now = get_unified_price(c1_raw)
-        ake_info = analyze_ake_1m_scalp(cl1_ake, [], p_now)
+        ake_info = analyze_ake_1m_scalp(cl1_ake, cl15_ake, p_now)
         ake_trade = await db.state_get("current_trade_ake") or ake_info.get("candidate")
         ake_stats = await get_ake_stats_summary()
         png = await render_ake_chart_async(
-            cl1_ake, ake_trade=ake_trade, ake_stats=ake_stats, scalp_band=ake_info.get("scalp_band"), zones_1m=ake_info.get("zones_1m")
+            cl1_ake, ake_trade=ake_trade, ake_stats=ake_stats,
+            scalp_band=ake_info.get("scalp_band"), zones_1m=ake_info.get("zones_1m")
         )
         if png:
             d_st = ake_stats["day"]
@@ -5205,21 +4953,13 @@ async def handle_command(session, chat_id, text, message_id=None):
         async with _ake_monitor_lock:
             await db.clear_ake_trades()
             await db.state_set("current_trade_ake", None)
-        await send_telegram(
-            session,
-            "🧹 <b>Ake signals 7 (1m) tarixi va R-jadvali 0 ga tozalandi!</b>",
-            chat_id=cid,
-        )
+        await send_telegram(session, "🧹 <b>Ake signals 7 (1m) tarixi va R-jadvali 0 ga tozalandi!</b>", chat_id=cid)
 
     elif cmd == "/day_reset":
         async with _monitor_lock:
             await db.clear_day_trades()
             await db.state_set("current_trade", None)
-        await send_telegram(
-            session,
-            "🧹 <b>Day Trading (15m) tarixi va Win Rate statistikasi 0 ga tozalandi!</b>",
-            chat_id=cid,
-        )
+        await send_telegram(session, "🧹 <b>Day Trading (15m) tarixi va Win Rate statistikasi 0 ga tozalandi!</b>", chat_id=cid)
 
     elif cmd == "/ake_close":
         async with _ake_monitor_lock:
@@ -5227,49 +4967,42 @@ async def handle_command(session, chat_id, text, message_id=None):
             if not ake_trade:
                 await send_telegram(session, "📭 Ochiq Ake 1m bitim yo'q.", chat_id=cid)
                 return
-            cur_p = live_price() or (_LAST_CANDLES_1M[-1][C] if _LAST_CANDLES_1M else ake_trade["entry"])
+            cur_p = get_unified_price(_LAST_CANDLES_1M) or ake_trade["entry"]
             await close_ake_trade(session, ake_trade, round(cur_p, 2), reason_label="MANUAL")
 
     elif cmd in ("/ake_toggle", "/ake_on", "/ake_off"):
         cur_en = await db.state_get("ake_enabled", AKE_ENABLED_DEFAULT)
         new_en = True if cmd == "/ake_on" else (False if cmd == "/ake_off" else (not cur_en))
         await db.state_set("ake_enabled", new_en)
-        await send_telegram(
-            session,
-            f"⚡ <b>Ake Signals 7 (1m Scalping):</b> {'🟢 YOQILDI' if new_en else '🔴 O`CHIRILDI'}",
-            chat_id=cid,
-        )
+        await send_telegram(session, f"⚡ <b>Ake Signals 7 (1m Skalp):</b> {'🟢 YOQILDI' if new_en else '🔴 O`CHIRILDI'}", chat_id=cid)
 
     elif cmd in ("/day_toggle", "/day_on", "/day_off"):
         cur_en = await db.state_get("day_enabled", DAY_ENABLED_DEFAULT)
         new_en = True if cmd == "/day_on" else (False if cmd == "/day_off" else (not cur_en))
         await db.state_set("day_enabled", new_en)
-        await send_telegram(
-            session,
-            f"📊 <b>Day Trading (15m/5m SMC+ICT):</b> {'🟢 YOQILDI' if new_en else '🔴 O`CHIRILGAN'}",
-            chat_id=cid,
-        )
+        await send_telegram(session, f"📊 <b>Day Trading (15m/5m SMC+ICT):</b> {'🟢 YOQILDI' if new_en else '🔴 O`CHIRILDI'}", chat_id=cid)
 
     elif cmd == "/exness_mode":
         if len(parts) >= 2 and parts[1].lower() in ("day", "ake", "both"):
             m_val = parts[1].lower()
             await db.state_set("exness_mode", m_val)
-            await send_telegram(
-                session,
-                f"🏦 <b>Exness avto-savdo rejimi o'zgartirildi:</b> <code>{m_val.upper()}</code>\n"
-                "• <code>day</code> — faqat Day Trading (15m) signallarini ochadi\n"
-                "• <code>ake</code> — faqat Ake Signals 7 (1m) signallarini ochadi\n"
-                "• <code>both</code> — ikkala tizim signallarini ham ochadi",
-                chat_id=cid,
-            )
+            await send_telegram(session, f"🏦 <b>Exness avto-savdo rejimi:</b> <code>{m_val.upper()}</code>", chat_id=cid)
         else:
             cur_m = await db.state_get("exness_mode", EXNESS_AUTOTRADE_DEFAULT_MODE)
-            await send_telegram(
-                session,
-                f"🏦 <b>Joriy Exness avto-savdo rejimi:</b> <code>{cur_m.upper()}</code>\n"
-                "O'zgartirish: <code>/exness_mode day</code> | <code>/exness_mode ake</code> | <code>/exness_mode both</code>",
-                chat_id=cid,
-            )
+            await send_telegram(session, f"🏦 <b>Joriy Exness avto-savdo rejimi:</b> <code>{cur_m.upper()}</code> (day | ake | both)", chat_id=cid)
+
+    elif cmd == "/broker":
+        if len(parts) >= 2 and parts[1].lower() in ("exness", "xm"):
+            _ACTIVE_BROKER = parts[1].lower()
+            await db.state_set("active_broker", _ACTIVE_BROKER)
+            await run_auto_sync_once(session, force=True)
+            await send_telegram(session, f"🏦 <b>Faol broker: {_ACTIVE_BROKER.upper()}</b> | Narx: <code>{get_unified_price()}</code>", chat_id=cid)
+        else:
+            await send_telegram(session, f"🏦 <b>Joriy broker: {_ACTIVE_BROKER.upper()}</b> (<code>/broker exness</code> yoki <code>/broker xm</code>)", chat_id=cid)
+
+    elif cmd == "/autosync":
+        info = await run_auto_sync_once(session, force=True)
+        await send_telegram(session, f"🔄 <b>Avto-Sync:</b> Narx <code>{get_unified_price()}</code> | Offset <code>{_CURRENT_OFFSET:+.2f}</code>", chat_id=cid)
 
     elif cmd in ("/signal", "/status", "/day"):
         status = await analyze_gold_market(session, run_deep_scoring=False)
@@ -5439,629 +5172,21 @@ async def handle_command(session, chat_id, text, message_id=None):
         except Exception as e:
             await send_telegram(session, f"⚠️ Xato: {html.escape(str(e))}", chat_id=cid)
 
-    elif cmd in ("/sync", "/sync_exness", "/sync_xm") and len(parts) >= 2:
+    elif cmd == "/sync" and len(parts) >= 2:
         try:
-            target_brk = "xm" if cmd == "/sync_xm" else ("exness" if cmd == "/sync_exness" else _ACTIVE_BROKER)
-            _ACTIVE_BROKER = target_brk
-            await db.state_set("active_broker", _ACTIVE_BROKER)
-
             broker_p = float(parts[1].replace(",", "."))
             raw_bybit = _LIVE_BYBIT_RAW_PRICE or await fetch_raw_price(session)
-            spot_p, _ = await fetch_spot_xauusd_price(session)
-            if spot_p:
-                _BROKER_CALIBRATION[target_brk] = round(broker_p - spot_p, 2)
-                await db.state_set("broker_calibration", _BROKER_CALIBRATION)
-
             new_off = round(broker_p - raw_bybit, 2)
             delta = await apply_offset_change(new_off)
             await send_telegram(
                 session,
-                f"🔄 <b>{target_brk.upper()} narxi sinxronlandi va Avto-Sync kalibrlandi!</b>\n"
-                f"{target_brk.upper()} narxi: <code>{broker_p:.2f}</code> | Bybit: <code>{raw_bybit:.2f}</code>\n"
+                f"🔄 <b>Narx sinxronlandi!</b>\n"
+                f"Broker narxi: <code>{broker_p:.2f}</code> | Bybit: <code>{raw_bybit:.2f}</code>\n"
                 f"Yangi Offset: <code>{_CURRENT_OFFSET:+.2f}</code> (Siljish: <code>{delta:+.2f}$</code>)",
                 chat_id=cid,
             )
         except Exception as e:
-            await send_telegram(session, f"⚠️ Format: <code>/sync 4135.20</code> yoki <code>/sync_exness 4135.20</code> | <code>/sync_xm 4135.45</code> ({html.escape(str(e))})", chat_id=cid)
-
-    elif cmd == "/broker":
-        if len(parts) >= 2 and parts[1].lower() in ("exness", "xm"):
-            _ACTIVE_BROKER = parts[1].lower()
-            await db.state_set("active_broker", _ACTIVE_BROKER)
-            info = await run_auto_sync_once(session, force=True)
-            cur_p = get_unified_price()
-            await send_telegram(
-                session,
-                f"🏦 <b>Faol broker o'zgartirildi: {_ACTIVE_BROKER.upper()}</b>\n"
-                f"Joriy {_ACTIVE_BROKER.upper()} narxi: <code>{cur_p}</code> (Offset: <code>{_CURRENT_OFFSET:+.2f}</code>)\n"
-                f"Exness va XM narxlari avtomatik Spot XAU/USD ga bog'langan.",
-                chat_id=cid,
-            )
-        else:
-            ex_p = _LAST_SPOT_SYNC_INFO.get("exness_price")
-            xm_p = _LAST_SPOT_SYNC_INFO.get("xm_price")
-            await send_telegram(
-                session,
-                f"🏦 <b>Joriy faol broker: {_ACTIVE_BROKER.upper()}</b>\n"
-                f"• Exness narxi: <code>{ex_p}</code> (kalibrlash: <code>/sync_exness NARX</code>)\n"
-                f"• XM narxi: <code>{xm_p}</code> (kalibrlash: <code>/sync_xm NARX</code>)\n"
-                "Almashtirish: <code>/broker exness</code> yoki <code>/broker xm</code>",
-                chat_id=cid,
-            )
-
-    elif cmd == "/autosync":
-        arg = parts[1].lower() if len(parts) >= 2 else "now"
-        if arg in ("on", "1", "true"):
-            _AUTO_SYNC_ENABLED = True
-            await db.state_set("auto_sync_enabled", True)
-            info = await run_auto_sync_once(session, force=True)
-            await send_telegram(
-                session,
-                f"🟢 <b>Avto-Sync YOQILDI!</b> ({_ACTIVE_BROKER.upper()})\n"
-                f"Joriy narx: <code>{get_unified_price()}</code> | Offset: <code>{_CURRENT_OFFSET:+.2f}</code>",
-                chat_id=cid,
-            )
-        elif arg in ("off", "0", "false"):
-            _AUTO_SYNC_ENABLED = False
-            await db.state_set("auto_sync_enabled", False)
-            await send_telegram(session, "⚪ <b>Avto-Sync O'CHIRILDI.</b> (Qo'lda /sync ishlaydi)", chat_id=cid)
-        else:
-            info = await run_auto_sync_once(session, force=True)
-            if info:
-                await send_telegram(
-                    session,
-                    f"🔄 <b>Avto-Sync bajarildi ({html.escape(str(info.get('source')))}):</b>\n"
-                    f"🏦 Exness: <code>{info.get('exness_price')}</code> | 🏛 XM: <code>{info.get('xm_price')}</code>\n"
-                    f"📈 Bybit raw: <code>{info.get('bybit_raw')}</code> | Offset ({_ACTIVE_BROKER.upper()}): <code>{_CURRENT_OFFSET:+.2f}</code>",
-                    chat_id=cid,
-                )
-            else:
-                await send_telegram(session, "⚠️ Spot XAU/USD manbasiga ulanib bo'lmadi, joriy offset saqlandi.", chat_id=cid)
-
-    elif cmd == "/metaapi_set":
-        if len(parts) < 3:
-            await send_telegram(
-                session,
-                "☁️ <b>Railway & Termux uchun Cloud MT5 Avto-Savdo (MetaApi) ulash:</b>\n"
-                "Format: <code>/metaapi_set METAAPI_TOKEN ACCOUNT_ID [SYMBOL] [LOT]</code>\n"
-                "Misol (Exness): <code>/metaapi_set eyJhbG... 1a2b3c4d-5678 XAUUSDm 0.01</code>\n"
-                "Misol (XM): <code>/metaapi_set eyJhbG... 1a2b3c4d-5678 GOLD 0.01</code>\n\n"
-                "💡 <i>MetaApi.cloud da bepul ro'yxatdan o'tib, Exness/XM MT5 login-parolingizni ulaysiz va Token hamda Account ID ni shu yerga yuborasiz — shunda Windows kompyutersiz to'g'ridan-to'g'ri Railway yoki Termux'da 24/7 avto-savdo ishlaydi!</i>",
-                chat_id=cid,
-            )
-            return
-        m_tok = parts[1].strip()
-        m_acc = parts[2].strip()
-        m_sym = parts[3].strip() if len(parts) >= 4 else ("GOLD" if _ACTIVE_BROKER == "xm" else "XAUUSDm")
-        m_lot = float(parts[4]) if len(parts) >= 5 else 0.01
-        await db.state_set("metaapi_config", {"token": m_tok, "account_id": m_acc, "symbol": m_sym, "lot": m_lot})
-        pw_enc = encrypt_secret(m_tok)
-        slot = await db.add_or_update_exness_account(cid, m_acc, pw_enc, "METAAPI-CLOUD", label="Cloud MT5", lot=m_lot, symbol=m_sym)
-        await send_telegram(
-            session,
-            f"✅ <b>Cloud MT5 Avto-Savdo (#{slot}-slot) ulandi!</b>\n"
-            f"Account ID: <code>{html.escape(m_acc[:12])}...</code> | Simbol: <code>{html.escape(m_sym)}</code> | Lot: <code>{m_lot:.2f}</code>\n"
-            f"🔒 Token xabaringiz xavfsizlik uchun chatdan o'chirildi.",
-            chat_id=cid,
-        )
-
-    elif cmd == "/test_order":
-        side_arg = parts[1].upper() if len(parts) >= 2 else "BUY"
-        sig_type = "LONG" if side_arg in ("BUY", "LONG") else "SHORT"
-        cur_p = get_unified_price(_LAST_CANDLES_1M or _LAST_CANDLES_15M) or 4135.00
-        sl_p = round(cur_p - 2.50, 2) if sig_type == "LONG" else round(cur_p + 2.50, 2)
-        tp_p = round(cur_p + 5.00, 2) if sig_type == "LONG" else round(cur_p - 5.00, 2)
-        test_trade = {
-            "engine": "TEST_ORDER",
-            "signal": sig_type,
-            "entry": cur_p,
-            "sl": sl_p,
-            "tp1": tp_p,
-            "tp2": tp_p,
-            "lot": XM_MIN_LOT,
-        }
-        await execute_exness_autotrades(session, test_trade)
-        t_online = (time.time() - _TERMUX_BRIDGE_STATE.get("last_seen", 0)) <= 20
-        st_line = "🟢 Termux ulangan — buyruq Termux'ga yuborildi!" if t_online else "⏳ Buyruq navbatga qo'shildi (Termux'da termux_autotrader.py ni yoqing)!"
-        await send_telegram(
-            session,
-            f"🧪 <b>Test Order ({side_txt(sig_type)} 0.01 lot) yuborildi!</b>\n"
-            f"Kirish: <code>{cur_p}</code> | SL: <code>{sl_p}</code> | TP: <code>{tp_p}</code>\n"
-            f"{st_line}",
-            chat_id=cid,
-        )
-
-    elif cmd == "/termux":
-        t_age = time.time() - _TERMUX_BRIDGE_STATE.get("last_seen", 0)
-        t_on = t_age <= 20
-        t_status = (
-            f"🟢 <b>ULANGAN</b> (Hisob: <code>{_TERMUX_BRIDGE_STATE.get('login')}</code> | "
-            f"Server: <code>{_TERMUX_BRIDGE_STATE.get('server')}</code> | "
-            f"Narx: <code>{_TERMUX_BRIDGE_STATE.get('bid')}</code> | "
-            f"Balans: <b>${_TERMUX_BRIDGE_STATE.get('balance')}</b>)"
-            if t_on else "⚪ <b>Hozircha ulanmagan</b> (Termux'da <code>python termux_autotrader.py</code> ni ishga tushiring)"
-        )
-        await send_telegram(
-            session,
-            f"📱 <b>Termux Avto-Trade Holati:</b> {t_status}\n\n"
-            "🚀 <b>MetaApi.cloud'siz to'g'ridan-to'g'ri Termux'da yoqish:</b>\n"
-            "1. Termux'ga <code>termux_autotrader.py</code> faylini yuklang.\n"
-            "2. Termux ichida 1 marta o'rnating:\n"
-            "<pre>pkg update -y && pkg install x11-repo tur-repo -y\n"
-            "pkg install python chromium -y\n"
-            "pip install aiohttp selenium</pre>\n"
-            "3. Ishga tushiring:\n"
-            "<pre>python termux_autotrader.py</pre>\n"
-            "4. Birinchi marta ishga tushganda Railway ssilkangizni va Exness/XM Login, Parol, Serveringizni so'raydi va saqlab oladi.\n"
-            "5. Tekshirish uchun Telegram'da <code>/test_order buy</code> yuborsangiz, Termux darhol Exness/XM da 0.01 lot ochadi!",
-            chat_id=cid,
-        )
-        return
-    elif cmd in ("/ake", "/ake_signal"):
-        c1_raw = await fetch_ohlcv(session, "1m", limit=AKE_LIMIT)
-        cl1_ake = closed_only(c1_raw)
-        p_now = get_unified_price(c1_raw)
-        ake_info = analyze_ake_1m_scalp(cl1_ake, [], p_now)
-        ake_trade = await db.state_get("current_trade_ake")
-        ake_en = await db.state_get("ake_enabled", AKE_ENABLED_DEFAULT)
-        sb = ake_info.get("scalp_band") or (0.0, 0.0)
-        lines = [
-            f"⚡ <b>Ake signals 7 (1m Scalping): {p_now:.2f}</b>",
-            f"Holat: <b>{'🟢 FAOL' if ake_en else '🔴 O`CHIRILGAN'}</b> | 1m Trend: <b>{trend_txt(ake_info.get('trend_1m'))}</b>",
-            f"Scalp Band: <code>{sb[0]:.2f} — {sb[1]:.2f}</code> | 1m ATR: <code>{ake_info.get('atr1')}</code>",
-            f"Asia (18:00-02:00): High <code>{ake_info.get('asia_high')}</code> / Low <code>{ake_info.get('asia_low')}</code>",
-        ]
-        if ake_trade:
-            lines.append("")
-            acc_ake = await get_account()
-            lines.append(format_ake_signal_message(ake_trade, balance=acc_ake['balance']))
-        else:
-            lines.append("📭 Hozir ochiq 1m Ake bitim yo'q (yangi 1m impuls kutilmoqda)")
-        lines.append("")
-        lines.append(await format_ake_stats_table_message())
-        await send_telegram(session, "\n".join(lines), with_keyboard=True, chat_id=cid)
-
-    elif cmd == "/ake_chart":
-        c1_raw = await fetch_ohlcv(session, "1m", limit=AKE_LIMIT)
-        cl1_ake = closed_only(c1_raw)
-        p_now = get_unified_price(c1_raw)
-        ake_info = analyze_ake_1m_scalp(cl1_ake, [], p_now)
-        ake_trade = await db.state_get("current_trade_ake") or ake_info.get("candidate")
-        ake_stats = await get_ake_stats_summary()
-        png = await render_ake_chart_async(
-            cl1_ake, ake_trade=ake_trade, ake_stats=ake_stats, scalp_band=ake_info.get("scalp_band")
-        )
-        if png:
-            d_st = ake_stats["day"]
-            cap = (
-                f"⚡ <b>Ake signals 7 · 1m XAUUSD</b> | Narx: <code>{p_now:.2f}</code>\n"
-                f"День: {d_st['total']} bitim | Тейк: {d_st['wins']} ({d_st['wr']}%) | "
-                f"Стоп -1R: {d_st['losses']} | Итого: <b>{d_st['total_r']:+.1f}R</b>"
-            )
-            await send_telegram_photo(session, png, caption=cap, chat_id=cid)
-        else:
-            await send_telegram(session, "⚠️ 1m Ake grafik chizish uchun shamlar yetarli emas.", chat_id=cid)
-
-    elif cmd in ("/ake_stats", "/ake_stat"):
-        msg = await format_ake_stats_table_message()
-        recent_ake = await db.get_recent_ake_trades(limit=8)
-        if recent_ake:
-            msg += "\n\n📜 <b>Oxirgi Ake 1m bitimlar:</b>"
-            for r in recent_ake:
-                msg += (
-                    f"\n • <b>{side_txt(r['signal'])}</b> | {html.escape(str(r['result']))} | "
-                    f"<code>{r['entry']:.2f} ➡️ {r['close_price']:.2f}</code> (Rekord: <b>{r['peak_r']:+.1f}R</b>)"
-                )
-        await send_telegram(session, msg, with_keyboard=True, chat_id=cid)
-
-    elif cmd == "/ake_reset":
-        async with _ake_monitor_lock:
-            await db.clear_ake_trades()
-            await db.state_set("current_trade_ake", None)
-        await send_telegram(
-            session,
-            "🧹 <b>Ake signals 7 (1m) tarixi va R-jadvali 0 ga tozalandi!</b>",
-            chat_id=cid,
-        )
-
-    elif cmd == "/day_reset":
-        async with _monitor_lock:
-            await db.clear_day_trades()
-            await db.state_set("current_trade", None)
-        await send_telegram(
-            session,
-            "🧹 <b>Day Trading (15m) tarixi va Win Rate statistikasi 0 ga tozalandi!</b>",
-            chat_id=cid,
-        )
-
-    elif cmd == "/ake_close":
-        async with _ake_monitor_lock:
-            ake_trade = await db.state_get("current_trade_ake")
-            if not ake_trade:
-                await send_telegram(session, "📭 Ochiq Ake 1m bitim yo'q.", chat_id=cid)
-                return
-            cur_p = live_price() or (_LAST_CANDLES_1M[-1][C] if _LAST_CANDLES_1M else ake_trade["entry"])
-            await close_ake_trade(session, ake_trade, round(cur_p, 2), reason_label="MANUAL")
-
-    elif cmd in ("/ake_toggle", "/ake_on", "/ake_off"):
-        cur_en = await db.state_get("ake_enabled", AKE_ENABLED_DEFAULT)
-        new_en = True if cmd == "/ake_on" else (False if cmd == "/ake_off" else (not cur_en))
-        await db.state_set("ake_enabled", new_en)
-        await send_telegram(
-            session,
-            f"⚡ <b>Ake Signals 7 (1m Scalping):</b> {'🟢 YOQILDI' if new_en else '🔴 O`CHIRILDI'}",
-            chat_id=cid,
-        )
-
-    elif cmd in ("/day_toggle", "/day_on", "/day_off"):
-        cur_en = await db.state_get("day_enabled", DAY_ENABLED_DEFAULT)
-        new_en = True if cmd == "/day_on" else (False if cmd == "/day_off" else (not cur_en))
-        await db.state_set("day_enabled", new_en)
-        await send_telegram(
-            session,
-            f"📊 <b>Day Trading (15m/5m SMC+ICT):</b> {'🟢 YOQILDI' if new_en else '🔴 O`CHIRILGAN'}",
-            chat_id=cid,
-        )
-
-    elif cmd == "/exness_mode":
-        if len(parts) >= 2 and parts[1].lower() in ("day", "ake", "both"):
-            m_val = parts[1].lower()
-            await db.state_set("exness_mode", m_val)
-            await send_telegram(
-                session,
-                f"🏦 <b>Exness avto-savdo rejimi o'zgartirildi:</b> <code>{m_val.upper()}</code>\n"
-                "• <code>day</code> — faqat Day Trading (15m) signallarini ochadi\n"
-                "• <code>ake</code> — faqat Ake Signals 7 (1m) signallarini ochadi\n"
-                "• <code>both</code> — ikkala tizim signallarini ham ochadi",
-                chat_id=cid,
-            )
-        else:
-            cur_m = await db.state_get("exness_mode", EXNESS_AUTOTRADE_DEFAULT_MODE)
-            await send_telegram(
-                session,
-                f"🏦 <b>Joriy Exness avto-savdo rejimi:</b> <code>{cur_m.upper()}</code>\n"
-                "O'zgartirish: <code>/exness_mode day</code> | <code>/exness_mode ake</code> | <code>/exness_mode both</code>",
-                chat_id=cid,
-            )
-
-    elif cmd in ("/signal", "/status", "/day"):
-        status = await analyze_gold_market(session, run_deep_scoring=False)
-        msg = await format_status_message(status)
-        await send_telegram(session, msg, with_keyboard=True, chat_id=cid)
-
-    elif cmd == "/chart":
-        now_m = time.monotonic()
-        if now_m - _chart_last.get(cid, 0) < CHART_COOLDOWN_SEC:
-            await send_telegram(session, "⏳ Grafik uchun biroz kuting (10s cooldown).", chat_id=cid)
-            return
-        _bounded_set(_chart_last, cid, now_m)
-        status = await analyze_gold_market(session, run_deep_scoring=False)
-        trade = await db.state_get("current_trade")
-        png = await render_chart_async(status["cl15"], status["zones15"], status["struct15"], trade=trade)
-        if png:
-            cap = (
-                f"🖼 <b>XAUUSD 15m SMC Grafik</b> | Narx: <code>{status['price']}</code>\n"
-                f"15m Bias: <b>{status['b15']}</b> | EQ(50%): <code>{status['eq15']}</code> | "
-                f"PDH/PDL: <code>{status['pdh']}</code> / <code>{status['pdl']}</code>"
-            )
-            await send_telegram_photo(session, png, caption=cap, chat_id=cid)
-        else:
-            await send_telegram(session, "⚠️ Grafik chizish uchun yetarli shamlar yo'q.", chat_id=cid)
-
-    elif cmd == "/zones":
-        status = await analyze_gold_market(session, run_deep_scoring=False)
-        zones = status["zones15"]
-        p = status["price"]
-        bull_z = [z for z in zones if z["type"] == "bullish"]
-        bear_z = [z for z in zones if z["type"] == "bearish"]
-        bull_z.sort(key=lambda z: abs(p - z["ce"]))
-        bear_z.sort(key=lambda z: abs(p - z["ce"]))
-
-        lines = [
-            f"🎯 <b>Zonalar (narx: {p})</b>",
-            f"🟢 <b>BUY zonalari (pastda):</b>",
-        ]
-        for z in bull_z[:5]:
-            dist = p - z["ce"]
-            lines.append(f" • <b>{z['kind']}</b>: <code>{z['bottom']:.2f} — {z['top']:.2f}</code> (CE: {z['ce']:.2f} | {dist:+.1f}$)")
-        if not bull_z:
-            lines.append(" • yo'q")
-
-        lines.append("\n🔴 <b>SELL zonalari (tepada):</b>")
-        for z in bear_z[:5]:
-            dist = z["ce"] - p
-            lines.append(f" • <b>{z['kind']}</b>: <code>{z['bottom']:.2f} — {z['top']:.2f}</code> (CE: {z['ce']:.2f} | +{dist:.1f}$)")
-        if not bear_z:
-            lines.append(" • yo'q")
-
-        htf_z = status.get("htf_zones") or []
-        if htf_z:
-            lines.append("\n🏛 <b>1 Oylik HTF (4H/1D) Zonalar:</b>")
-            htf_sorted = sorted(htf_z, key=lambda z: abs(p - z["ce"]))[:6]
-            for z in htf_sorted:
-                icon = "🟢" if z["type"] == "bullish" else "🔴"
-                lines.append(
-                    f" • {icon} <b>{z.get('tf', '4H')} {z['kind']}</b>: "
-                    f"<code>{z['bottom']:.2f} — {z['top']:.2f}</code> (CE: {z['ce']:.2f})"
-                )
-
-        await send_telegram(session, "\n".join(lines), chat_id=cid)
-
-    elif cmd == "/exness":
-        msg = await format_exness_menu(cid)
-        await send_telegram(session, msg, chat_id=cid)
-
-    elif cmd == "/exness_add":
-        if len(parts) < 3:
-            await send_telegram(
-                session,
-                "⚠️ Format: <code>/exness_add LOGIN PAROL [SERVER|AUTO] [LOT] [SYMBOL]</code>\n"
-                "Misol: <code>/exness_add 12345678 Parol123 AUTO 0.01 XAUUSDm</code>",
-                chat_id=cid,
-            )
-            return
-        login_id = parts[1].strip()
-        pw_plain = parts[2].strip()
-        srv = parts[3].strip() if len(parts) >= 4 else "AUTO"
-        lot_val = float(parts[4]) if len(parts) >= 5 else 0.01
-        sym_val = parts[5].strip() if len(parts) >= 6 else "XAUUSDm"
-
-        await send_telegram(session, f"🔄 Exness (<code>{html.escape(login_id)}</code>) tekshirilmoqda...", chat_id=cid)
-        async with _mt5_lock:
-            loop = asyncio.get_running_loop()
-            test_res = await loop.run_in_executor(None, _mt5_test_login_sync, login_id, pw_plain, srv)
-
-        if not test_res.get("ok"):
-            await send_telegram(
-                session,
-                f"❌ <b>Exness ulanish xatosi:</b> {html.escape(str(test_res.get('msg')))}",
-                chat_id=cid,
-            )
-            return
-
-        real_srv = test_res.get("server") or (EXNESS_DEFAULT_SERVER if srv.upper() == "AUTO" else srv)
-        real_sym = test_res.get("symbol") or sym_val
-        pw_enc = encrypt_secret(pw_plain)
-        try:
-            slot = await db.add_or_update_exness_account(
-                cid, login_id, pw_enc, real_srv, lot=max(0.01, round(lot_val, 2)), symbol=real_sym
-            )
-            await db.update_exness_status(
-                cid, slot, balance=test_res.get("balance"), status_text=test_res.get("msg", "Ulangan")
-            )
-            await send_telegram(
-                session,
-                f"✅ <b>Exness #{slot}-slot muvaffaqiyatli ulandi!</b>\n"
-                f"Login: <code>{html.escape(login_id)}</code> | Server: <code>{html.escape(real_srv)}</code>\n"
-                f"Simbol: <code>{html.escape(real_sym)}</code> | Lot: <code>{lot_val:.2f}</code>\n"
-                f"Holat: <i>{html.escape(str(test_res.get('msg')))}</i>\n"
-                f"🔒 Xavfsizlik uchun parol xabaringiz chatdan o'chirildi.",
-                chat_id=cid,
-            )
-        except Exception as e:
-            await send_telegram(session, f"❌ Xato: {html.escape(str(e))}", chat_id=cid)
-
-    elif cmd == "/exness_lot" and len(parts) >= 3:
-        try:
-            slot, lot_v = int(parts[1]), float(parts[2])
-            await db.toggle_exness_autotrade(cid, slot, lot=lot_v)
-            await send_telegram(session, f"✅ Exness #{slot}-slot lot hajmi <code>{max(0.01, round(lot_v, 2))}</code> ga o'zgartirildi.", chat_id=cid)
-        except Exception as e:
-            await send_telegram(session, f"⚠️ Xato: {html.escape(str(e))}", chat_id=cid)
-
-    elif cmd == "/exness_toggle" and len(parts) >= 2:
-        try:
-            slot = int(parts[1])
-            accs = await db.get_exness_accounts(cid)
-            target = next((a for a in accs if a["slot"] == slot), None)
-            if not target:
-                await send_telegram(session, f"⚠️ #{slot}-slot topilmadi.", chat_id=cid)
-                return
-            new_state = not target["auto_trade"]
-            await db.toggle_exness_autotrade(cid, slot, enabled=new_state)
-            st_txt = "🟢 YOQILDI" if new_state else "🔴 O'CHIRILDI"
-            await send_telegram(session, f"🏦 Exness #{slot}-slot avto-savdo: <b>{st_txt}</b>", chat_id=cid)
-        except Exception as e:
-            await send_telegram(session, f"⚠️ Xato: {html.escape(str(e))}", chat_id=cid)
-
-    elif cmd == "/exness_test" and len(parts) >= 2:
-        try:
-            slot = int(parts[1])
-            accs = await db.get_exness_accounts(cid)
-            target = next((a for a in accs if a["slot"] == slot), None)
-            if not target:
-                await send_telegram(session, f"⚠️ #{slot}-slot topilmadi.", chat_id=cid)
-                return
-            res = await test_exness_account(target)
-            await send_telegram(session, f"🔍 <b>Exness #{slot} natija:</b> {html.escape(str(res.get('msg')))}", chat_id=cid)
-        except Exception as e:
-            await send_telegram(session, f"⚠️ Xato: {html.escape(str(e))}", chat_id=cid)
-
-    elif cmd == "/exness_del" and len(parts) >= 2:
-        try:
-            slot = int(parts[1])
-            await db.delete_exness_account(cid, slot)
-            await send_telegram(session, f"🗑 Exness #{slot}-slot o'chirildi.", chat_id=cid)
-        except Exception as e:
-            await send_telegram(session, f"⚠️ Xato: {html.escape(str(e))}", chat_id=cid)
-
-    elif cmd in ("/sync", "/sync_exness", "/sync_xm") and len(parts) >= 2:
-        try:
-            target_brk = "xm" if cmd == "/sync_xm" else ("exness" if cmd == "/sync_exness" else _ACTIVE_BROKER)
-            _ACTIVE_BROKER = target_brk
-            await db.state_set("active_broker", _ACTIVE_BROKER)
-
-            broker_p = float(parts[1].replace(",", "."))
-            raw_bybit = _LIVE_BYBIT_RAW_PRICE or await fetch_raw_price(session)
-            spot_p, _ = await fetch_spot_xauusd_price(session)
-            if spot_p:
-                _BROKER_CALIBRATION[target_brk] = round(broker_p - spot_p, 2)
-                await db.state_set("broker_calibration", _BROKER_CALIBRATION)
-
-            new_off = round(broker_p - raw_bybit, 2)
-            delta = await apply_offset_change(new_off)
-            await send_telegram(
-                session,
-                f"🔄 <b>{target_brk.upper()} narxi sinxronlandi va Avto-Sync kalibrlandi!</b>\n"
-                f"{target_brk.upper()} narxi: <code>{broker_p:.2f}</code> | Bybit: <code>{raw_bybit:.2f}</code>\n"
-                f"Yangi Offset: <code>{_CURRENT_OFFSET:+.2f}</code> (Siljish: <code>{delta:+.2f}$</code>)",
-                chat_id=cid,
-            )
-        except Exception as e:
-            await send_telegram(session, f"⚠️ Format: <code>/sync 4135.20</code> yoki <code>/sync_exness 4135.20</code> | <code>/sync_xm 4135.45</code> ({html.escape(str(e))})", chat_id=cid)
-
-    elif cmd == "/broker":
-        if len(parts) >= 2 and parts[1].lower() in ("exness", "xm"):
-            _ACTIVE_BROKER = parts[1].lower()
-            await db.state_set("active_broker", _ACTIVE_BROKER)
-            info = await run_auto_sync_once(session, force=True)
-            cur_p = get_unified_price()
-            await send_telegram(
-                session,
-                f"🏦 <b>Faol broker o'zgartirildi: {_ACTIVE_BROKER.upper()}</b>\n"
-                f"Joriy {_ACTIVE_BROKER.upper()} narxi: <code>{cur_p}</code> (Offset: <code>{_CURRENT_OFFSET:+.2f}</code>)\n"
-                f"Exness va XM narxlari avtomatik Spot XAU/USD ga bog'langan.",
-                chat_id=cid,
-            )
-        else:
-            ex_p = _LAST_SPOT_SYNC_INFO.get("exness_price")
-            xm_p = _LAST_SPOT_SYNC_INFO.get("xm_price")
-            await send_telegram(
-                session,
-                f"🏦 <b>Joriy faol broker: {_ACTIVE_BROKER.upper()}</b>\n"
-                f"• Exness narxi: <code>{ex_p}</code> (kalibrlash: <code>/sync_exness NARX</code>)\n"
-                f"• XM narxi: <code>{xm_p}</code> (kalibrlash: <code>/sync_xm NARX</code>)\n"
-                "Almashtirish: <code>/broker exness</code> yoki <code>/broker xm</code>",
-                chat_id=cid,
-            )
-
-    elif cmd == "/autosync":
-        arg = parts[1].lower() if len(parts) >= 2 else "now"
-        if arg in ("on", "1", "true"):
-            _AUTO_SYNC_ENABLED = True
-            await db.state_set("auto_sync_enabled", True)
-            info = await run_auto_sync_once(session, force=True)
-            await send_telegram(
-                session,
-                f"🟢 <b>Avto-Sync YOQILDI!</b> ({_ACTIVE_BROKER.upper()})\n"
-                f"Joriy narx: <code>{get_unified_price()}</code> | Offset: <code>{_CURRENT_OFFSET:+.2f}</code>",
-                chat_id=cid,
-            )
-        elif arg in ("off", "0", "false"):
-            _AUTO_SYNC_ENABLED = False
-            await db.state_set("auto_sync_enabled", False)
-            await send_telegram(session, "⚪ <b>Avto-Sync O'CHIRILDI.</b> (Qo'lda /sync ishlaydi)", chat_id=cid)
-        else:
-            info = await run_auto_sync_once(session, force=True)
-            if info:
-                await send_telegram(
-                    session,
-                    f"🔄 <b>Avto-Sync bajarildi ({html.escape(str(info.get('source')))}):</b>\n"
-                    f"🏦 Exness: <code>{info.get('exness_price')}</code> | 🏛 XM: <code>{info.get('xm_price')}</code>\n"
-                    f"📈 Bybit raw: <code>{info.get('bybit_raw')}</code> | Offset ({_ACTIVE_BROKER.upper()}): <code>{_CURRENT_OFFSET:+.2f}</code>",
-                    chat_id=cid,
-                )
-            else:
-                await send_telegram(session, "⚠️ Spot XAU/USD manbasiga ulanib bo'lmadi, joriy offset saqlandi.", chat_id=cid)
-
-    elif cmd == "/metaapi_set":
-        if len(parts) < 3:
-            await send_telegram(
-                session,
-                "☁️ <b>Railway & Termux uchun Cloud MT5 Avto-Savdo (MetaApi) ulash:</b>\n"
-                "Format: <code>/metaapi_set METAAPI_TOKEN ACCOUNT_ID [SYMBOL] [LOT]</code>\n"
-                "Misol (Exness): <code>/metaapi_set eyJhbG... 1a2b3c4d-5678 XAUUSDm 0.01</code>\n"
-                "Misol (XM): <code>/metaapi_set eyJhbG... 1a2b3c4d-5678 GOLD 0.01</code>\n\n"
-                "💡 <i>MetaApi.cloud da bepul ro'yxatdan o'tib, Exness/XM MT5 login-parolingizni ulaysiz va Token hamda Account ID ni shu yerga yuborasiz — shunda Windows kompyutersiz to'g'ridan-to'g'ri Railway yoki Termux'da 24/7 avto-savdo ishlaydi!</i>",
-                chat_id=cid,
-            )
-            return
-        m_tok = parts[1].strip()
-        m_acc = parts[2].strip()
-        m_sym = parts[3].strip() if len(parts) >= 4 else ("GOLD" if _ACTIVE_BROKER == "xm" else "XAUUSDm")
-        m_lot = float(parts[4]) if len(parts) >= 5 else 0.01
-        await db.state_set("metaapi_config", {"token": m_tok, "account_id": m_acc, "symbol": m_sym, "lot": m_lot})
-        pw_enc = encrypt_secret(m_tok)
-        slot = await db.add_or_update_exness_account(cid, m_acc, pw_enc, "METAAPI-CLOUD", label="Cloud MT5", lot=m_lot, symbol=m_sym)
-        await send_telegram(
-            session,
-            f"✅ <b>Cloud MT5 Avto-Savdo (#{slot}-slot) ulandi!</b>\n"
-            f"Account ID: <code>{html.escape(m_acc[:12])}...</code> | Simbol: <code>{html.escape(m_sym)}</code> | Lot: <code>{m_lot:.2f}</code>\n"
-            f"🔒 Token xabaringiz xavfsizlik uchun chatdan o'chirildi.",
-            chat_id=cid,
-        )
-
-    elif cmd == "/test_order":
-        side_arg = parts[1].upper() if len(parts) >= 2 else "BUY"
-        sig_type = "LONG" if side_arg in ("BUY", "LONG") else "SHORT"
-        cur_p = get_unified_price(_LAST_CANDLES_1M or _LAST_CANDLES_15M) or 4135.00
-        sl_p = round(cur_p - 2.50, 2) if sig_type == "LONG" else round(cur_p + 2.50, 2)
-        tp_p = round(cur_p + 5.00, 2) if sig_type == "LONG" else round(cur_p - 5.00, 2)
-        test_trade = {
-            "engine": "TEST_ORDER",
-            "signal": sig_type,
-            "entry": cur_p,
-            "sl": sl_p,
-            "tp1": tp_p,
-            "tp2": tp_p,
-            "lot": XM_MIN_LOT,
-        }
-        await execute_exness_autotrades(session, test_trade)
-        t_online = (time.time() - _TERMUX_BRIDGE_STATE.get("last_seen", 0)) <= 20
-        st_line = "🟢 Termux ulangan — buyruq Termux'ga yuborildi!" if t_online else "⏳ Buyruq navbatga qo'shildi (Termux'da termux_autotrader.py ni yoqing)!"
-        await send_telegram(
-            session,
-            f"🧪 <b>Test Order ({side_txt(sig_type)} 0.01 lot) yuborildi!</b>\n"
-            f"Kirish: <code>{cur_p}</code> | SL: <code>{sl_p}</code> | TP: <code>{tp_p}</code>\n"
-            f"{st_line}",
-            chat_id=cid,
-        )
-
-    elif cmd == "/termux":
-        t_age = time.time() - _TERMUX_BRIDGE_STATE.get("last_seen", 0)
-        t_on = t_age <= 20
-        t_status = (
-            f"🟢 <b>ULANGAN</b> (Hisob: <code>{_TERMUX_BRIDGE_STATE.get('login')}</code> | "
-            f"Server: <code>{_TERMUX_BRIDGE_STATE.get('server')}</code> | "
-            f"Narx: <code>{_TERMUX_BRIDGE_STATE.get('bid')}</code> | "
-            f"Balans: <b>${_TERMUX_BRIDGE_STATE.get('balance')}</b>)"
-            if t_on else "⚪ <b>Hozircha ulanmagan</b> (Termux'da <code>python termux_autotrader.py</code> ni ishga tushiring)"
-        )
-        await send_telegram(
-            session,
-            f"📱 <b>Termux Avto-Trade Holati:</b> {t_status}\n\n"
-            "🚀 <b>MetaApi.cloud'siz to'g'ridan-to'g'ri Termux'da yoqish:</b>\n"
-            "1. Termux'ga <code>termux_autotrader.py</code> faylini yuklang.\n"
-            "2. Termux ichida 1 marta o'rnating:\n"
-            "<pre>pkg update -y && pkg install x11-repo tur-repo -y\n"
-            "pkg install python chromium -y\n"
-            "pip install aiohttp selenium</pre>\n"
-            "3. Ishga tushiring:\n"
-            "<pre>python termux_autotrader.py</pre>\n"
-            "4. Birinchi marta ishga tushganda Railway ssilkangizni va Exness/XM Login, Parol, Serveringizni so'raydi va saqlab oladi.\n"
-            "5. Tekshirish uchun Telegram'da <code>/test_order buy</code> yuborsangiz, Termux darhol Exness/XM da 0.01 lot ochadi!",
-            chat_id=cid,
-        )
-        return
-        msg = (
-            "📱 <b>Railway va Android Termux'da Exness/XM Avto-Savdoni Yoqish Qo'llanmasi:</b>\n\n"
-            "❓ <b>Nima uchun oddiy MT5 Railway'da ishlamagan?</b>\n"
-            "Standard <code>MetaTrader5</code> kutubxonasi faqat Windows (.exe) kompyuterda ishlaydi. Railway (Linux) va Android Termux'da ishlashi uchun botga <b>Cloud MT5 REST API (MetaApi)</b> qo'shildi!\n\n"
-            "🚀 <b>1-USUL: To'g'ridan-to'g'ri Railway'da (Telefon ham shart emas, 24/7 ishlaydi):</b>\n"
-            "1. <code>app.metaapi.cloud</code> saytida bepul hisob oching.\n"
-            "2. Exness yoki XM MT5 hisobingizni (Login, Parol, Server) qo'shing.\n"
-            "3. U yerdan <b>API Token</b> va <b>Account ID</b> ni nusxalab, botga yuboring:\n"
-            "   <code>/metaapi_set TOKEN ACCOUNT_ID XAUUSDm 0.01</code>\n"
-            "4. Avto-savdo rejimini tanlang: <code>/exness_mode both</code> (yoki <code>day</code> / <code>ake</code>).\n\n"
-            "📲 <b>2-USUL: Telefon Termux'da botni yoki Bridge'ni ishga tushirish:</b>\n"
-            "Termux ichida quyidagi buyruqlarni yozasiz:\n"
-            "<pre>pkg update && pkg install python git -y\n"
-            "pip install aiohttp aiosqlite cryptography python-dotenv\n"
-            "export BOT_TOKEN='TOKENINGIZ'\n"
-            "export CHAT_ID='ID_RAQAMINGIZ'\n"
-            "python uuf_fixed8.py</pre>"
-        )
-        await send_telegram(session, msg, chat_id=cid)
+            await send_telegram(session, f"⚠️ Format: <code>/sync 2915.50</code> ({html.escape(str(e))})", chat_id=cid)
 
     elif cmd == "/offset" and len(parts) >= 2:
         try:
@@ -6219,104 +5344,68 @@ MINI_APP_HTML = """<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
-<title>GOLD SMC v21 LIVE</title>
+<title>GOLD SMC v19 ULTIMATE</title>
 <script src="https://telegram.org/js/telegram-web-app.js"></script>
 <style>
-  :root { --bg:#0b0e14; --card:#151922; --gold:#f0b90b; --green:#10b981; --red:#f43f5e; --txt:#e6edf3; --muted:#8b949e; }
+  :root { --bg:#0d1117; --card:#161b22; --gold:#f0b90b; --green:#2ebd85; --red:#f6465d; --txt:#e6edf3; --muted:#8b949e; }
   * { box-sizing:border-box; margin:0; padding:0; font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif; }
-  body { background:var(--bg); color:var(--txt); padding:10px; font-size:13px; }
-  .hdr { display:flex; justify-content:space-between; align-items:center; padding:12px; background:var(--card); border-radius:12px; border:1px solid #262c3a; margin-bottom:10px; }
-  .price { font-size:24px; font-weight:800; color:var(--gold); letter-spacing:0.3px; }
-  .badge { padding:4px 8px; border-radius:6px; font-size:11px; font-weight:700; background:#21262d; display:inline-block; }
-  .tabs { display:flex; gap:6px; margin-bottom:8px; }
-  .tab { flex:1; padding:8px 6px; text-align:center; border-radius:8px; background:#1c2230; color:var(--muted); font-weight:700; font-size:12px; cursor:pointer; border:1px solid #262c3a; }
-  .tab.active { background:var(--gold); color:#000; border-color:var(--gold); }
-  .grid { display:grid; grid-template-columns:1fr 1fr; gap:7px; margin-bottom:10px; }
-  .card { background:var(--card); padding:11px; border-radius:12px; border:1px solid #262c3a; margin-bottom:10px; }
-  .card h3 { font-size:12px; color:var(--muted); margin-bottom:8px; text-transform:uppercase; display:flex; justify-content:space-between; }
-  .btn { width:100%; padding:9px; border:none; border-radius:8px; font-weight:700; cursor:pointer; color:#fff; background:#10b981; font-size:12px; }
+  body { background:var(--bg); color:var(--txt); padding:12px; font-size:14px; }
+  .hdr { display:flex; justify-content:space-between; align-items:center; padding:12px; background:var(--card); border-radius:12px; border:1px solid #30363d; margin-bottom:12px; }
+  .price { font-size:24px; font-weight:800; color:var(--gold); }
+  .badge { padding:4px 8px; border-radius:6px; font-size:12px; font-weight:600; background:#21262d; }
+  .grid { display:grid; grid-template-columns:1fr 1fr; gap:8px; margin-bottom:12px; }
+  .card { background:var(--card); padding:12px; border-radius:12px; border:1px solid #30363d; margin-bottom:12px; }
+  .card h3 { font-size:13px; color:var(--muted); margin-bottom:8px; text-transform:uppercase; }
+  .btn { width:100%; padding:10px; border:none; border-radius:8px; font-weight:700; cursor:pointer; color:#fff; background:#238636; transition:0.15s; }
   .btn.gold { background:var(--gold); color:#000; }
   .btn.red { background:var(--red); }
-  .btn.sec { background:#1f2637; color:var(--txt); border:1px solid #2e374f; }
-  input { width:100%; padding:8px; border-radius:8px; border:1px solid #2e374f; background:#0b0e14; color:var(--txt); margin-bottom:7px; font-size:13px; }
-  .row { display:flex; justify-content:space-between; padding:4px 0; border-bottom:1px solid #1f2430; }
-  canvas { width:100%; height:240px; display:block; border-radius:8px; background:#0f131c; border:1px solid #232a3b; }
+  .btn.sec { background:#21262d; color:var(--txt); border:1px solid #30363d; }
+  input { width:100%; padding:9px; border-radius:8px; border:1px solid #30363d; background:#0d1117; color:var(--txt); margin-bottom:8px; }
+  .row { display:flex; justify-content:space-between; padding:4px 0; border-bottom:1px solid #21262d; }
 </style>
 </head>
 <body>
   <div class="hdr">
     <div>
-      <div style="font-size:11px;color:var(--muted)" id="brk_label">XAUUSD (EXNESS AVTO-SYNC)</div>
+      <div style="font-size:12px;color:var(--muted)">XAUUSD (EXNESS/XM)</div>
       <div class="price" id="price">...</div>
-      <div style="font-size:11px;color:var(--muted);margin-top:2px" id="sub_prices">Exness: ... | XM: ...</div>
     </div>
     <div style="text-align:right">
-      <div class="badge" style="background:#10b98122;color:#10b981;border:1px solid #10b98155" id="bal_badge">💰 $20.00</div>
-      <div style="font-size:11px;color:var(--muted);margin-top:5px" id="bias">15m: ...</div>
-      <div style="font-size:11px;color:var(--muted);margin-top:2px" id="offset">Offset: ...</div>
+      <div class="badge" id="bias">15m: ...</div>
+      <div style="font-size:11px;color:var(--muted);margin-top:4px" id="offset">Offset: ...</div>
     </div>
   </div>
 
-  <div class="tabs">
-    <div class="tab active" id="tab_1m" onclick="setChartMode('1m')">⚡ 1m Ake Live</div>
-    <div class="tab" id="tab_15m" onclick="setChartMode('15m')">📊 15m Day Live</div>
-    <div class="tab" id="tab_tv" onclick="setChartMode('tv')">🌐 TradingView</div>
-  </div>
-
-  <div class="card" style="padding:8px">
-    <canvas id="live_canvas" width="720" height="360"></canvas>
-    <div id="tv_box" style="display:none;height:260px;border-radius:8px;overflow:hidden">
-      <iframe src="https://s.tradingview.com/widgetembed/?symbol=OANDA%3AXAUUSD&interval=1&theme=dark&style=1&timezone=Asia%2FTashkent"
-              style="width:100%;height:260px;border:0" allowfullscreen></iframe>
-    </div>
-    <div style="display:flex;gap:6px;margin-top:7px">
-      <button class="btn sec" id="btn_ex" onclick="setBroker('exness')">🏦 Exness</button>
-      <button class="btn sec" id="btn_xm" onclick="setBroker('xm')">🏛 XM</button>
-      <button class="btn gold" onclick="act('autosync')">🔄 Avto-Sync</button>
-    </div>
+  <div class="grid">
+    <button class="btn gold" onclick="act('signal')">📊 Telegram Signal</button>
+    <button class="btn sec" onclick="act('chart')">🖼 15m Grafik</button>
+    <button class="btn sec" onclick="act('ai')">🧠 Gemini AI</button>
+    <button class="btn red" onclick="act('close')">🛑 Bitimni Yopish</button>
   </div>
 
   <div class="card">
-    <h3><span>⚡ AKE SIGNALS 7 (1m Scalping 1R–5R)</span><span id="ake_work"></span></h3>
-    <div id="ake_box" style="margin-bottom:8px">Yuklanmoqda...</div>
-    <div id="ake_stats_box" style="font-size:12px;color:var(--muted);margin-bottom:8px"></div>
-    <div class="grid" style="margin-bottom:0">
-      <button class="btn gold" onclick="act('ake')">⚡ Ake Signal</button>
-      <button class="btn sec" onclick="act('ake_chart')">📉 1m Grafik</button>
-      <button class="btn sec" onclick="act('ake_stats')">📋 R-Jadval</button>
-      <button class="btn red" onclick="act('ake_close')">🛑 Ake Yopish</button>
-    </div>
+    <h3>⚡ Ochiq Bitim & ICT Darajalar</h3>
+    <div id="trade_box">Yuklanmoqda...</div>
   </div>
 
   <div class="card">
-    <h3><span>📊 DAY TRADING (15m/5m SMC+ICT)</span><span>1:3.5 RR</span></h3>
-    <div id="trade_box" style="margin-bottom:8px">Yuklanmoqda...</div>
-    <div class="grid" style="margin-bottom:0">
-      <button class="btn gold" onclick="act('signal')">📊 Day Signal</button>
-      <button class="btn sec" onclick="act('chart')">🖼 15m Grafik</button>
-      <button class="btn sec" onclick="act('ai')">🧠 Gemini AI</button>
-      <button class="btn red" onclick="act('close')">🛑 Day Yopish</button>
-    </div>
-  </div>
-
-  <div class="card">
-    <h3>🔄 Broker Narxini Aniq Kalibrlash (/sync)</h3>
+    <h3>🔄 Broker Narxini Sinxronlash (/sync)</h3>
     <div style="display:flex;gap:8px">
-      <input type="number" step="0.01" id="sync_p" placeholder="Exness/XM narxi (masalan 4135.20)" style="margin:0">
-      <button class="btn gold" style="width:110px" onclick="syncPrice()">Saqlash</button>
+      <input type="number" step="0.01" id="sync_p" placeholder="Exness/XM joriy narxi (masalan 2915.40)" style="margin:0">
+      <button class="btn gold" style="width:110px" onclick="syncPrice()">Sinxron</button>
     </div>
   </div>
 
   <div class="card">
-    <h3>🏦 Exness / XM Cloud MT5 Hisoblar</h3>
-    <div id="exness_list" style="margin-bottom:8px">...</div>
-    <input id="ex_login" placeholder="MT5 Login yoki MetaApi Account ID">
-    <input id="ex_pass" type="password" placeholder="MT5 Parol yoki MetaApi Token">
+    <h3>🏦 Exness MT5 Hisoblar (Max 3)</h3>
+    <div id="exness_list" style="margin-bottom:10px">...</div>
+    <input id="ex_login" placeholder="MT5 Login ID">
+    <input id="ex_pass" type="password" placeholder="MT5 Parol">
     <div style="display:flex;gap:8px">
-      <input id="ex_srv" placeholder="Server (AUTO yoki METAAPI)" value="AUTO">
+      <input id="ex_srv" placeholder="Server (AUTO)" value="AUTO">
       <input id="ex_lot" type="number" step="0.01" placeholder="Lot" value="0.01">
     </div>
-    <button class="btn" onclick="addExness()">➕ MT5 Hisob Ulash</button>
+    <button class="btn" onclick="addExness()">➕ Exness Hisob Ulash</button>
   </div>
 
 <script>
@@ -6324,18 +5413,6 @@ const tg = window.Telegram && window.Telegram.WebApp ? window.Telegram.WebApp : 
 if (tg) { tg.expand(); }
 const initData = tg ? tg.initData : "";
 const urlToken = new URLSearchParams(location.search).get("token") || "";
-let chartMode = "1m";
-let lastData = null;
-
-function setChartMode(m) {
-  chartMode = m;
-  document.getElementById("tab_1m").className = "tab" + (m === "1m" ? " active" : "");
-  document.getElementById("tab_15m").className = "tab" + (m === "15m" ? " active" : "");
-  document.getElementById("tab_tv").className = "tab" + (m === "tv" ? " active" : "");
-  document.getElementById("live_canvas").style.display = (m === "tv") ? "none" : "block";
-  document.getElementById("tv_box").style.display = (m === "tv") ? "block" : "none";
-  if (lastData && m !== "tv") drawLiveChart(lastData);
-}
 
 async function api(path, body=null) {
   const opts = { headers: { "Content-Type":"application/json", "X-Telegram-Init-Data": initData, "X-Dashboard-Token": urlToken } };
@@ -6344,170 +5421,32 @@ async function api(path, body=null) {
   return await r.json();
 }
 
-function drawLiveChart(d) {
-  const cvs = document.getElementById("live_canvas");
-  if (!cvs) return;
-  const ctx = cvs.getContext("2d");
-  const W = cvs.width, H = cvs.height;
-  ctx.fillStyle = "#0f131c";
-  ctx.fillRect(0, 0, W, H);
-
-  const candles = (chartMode === "1m" ? d.candles_1m : d.candles_15m) || [];
-  if (candles.length < 5) {
-    ctx.fillStyle = "#8b949e";
-    ctx.font = "16px sans-serif";
-    ctx.fillText("Shamlar yuklanmoqda...", 260, 180);
-    return;
-  }
-
-  const activeTrade = (chartMode === "1m") ? d.ake_trade : d.trade;
-  let pMax = -1e9, pMin = 1e9;
-  for (const c of candles) {
-    if (c[2] > pMax) pMax = c[2];
-    if (c[3] < pMin) pMin = c[3];
-  }
-  if (activeTrade) {
-    const lvls = [activeTrade.entry, activeTrade.sl, activeTrade.tp1, activeTrade.tp2, activeTrade.tp3, activeTrade.tp4, activeTrade.tp5];
-    for (const v of lvls) {
-      if (v) {
-        if (v > pMax) pMax = v;
-        if (v < pMin) pMin = v;
-      }
-    }
-  }
-  const pad = Math.max((pMax - pMin) * 0.10, 0.8);
-  pMax += pad; pMin -= pad;
-
-  const ml = 12, mr = 86, mt = 28, mb = 18;
-  const pw = W - ml - mr, ph = H - mt - mb;
-  const toY = (p) => mt + ((pMax - p) / Math.max(pMax - pMin, 0.01)) * ph;
-
-  // Grid
-  ctx.strokeStyle = "#1c2333";
-  ctx.lineWidth = 1;
-  ctx.fillStyle = "#8b949e";
-  ctx.font = "11px monospace";
-  for (let i = 0; i <= 5; i++) {
-    const gp = pMin + (pMax - pMin) * (i / 5);
-    const gy = toY(gp);
-    ctx.beginPath(); ctx.moveTo(ml, gy); ctx.lineTo(W - mr, gy); ctx.stroke();
-    ctx.fillText(gp.toFixed(2), W - mr + 6, gy + 4);
-  }
-
-  const totalSlots = candles.length + (activeTrade ? 8 : 2);
-  const stepX = pw / totalSlots;
-  const cw = Math.max(3, stepX * 0.65);
-
-  // Candlesticks
-  candles.forEach((c, i) => {
-    const cx = ml + (i + 0.5) * stepX;
-    const yo = toY(c[1]), yh = toY(c[2]), yl = toY(c[3]), yc = toY(c[4]);
-    const bull = c[4] >= c[1];
-    ctx.strokeStyle = bull ? "#10b981" : "#f43f5e";
-    ctx.fillStyle = bull ? "#10b981" : "#f43f5e";
-    ctx.beginPath(); ctx.moveTo(cx, yh); ctx.lineTo(cx, yl); ctx.stroke();
-    const top = Math.min(yo, yc), bot = Math.max(yo, yc);
-    ctx.fillRect(cx - cw / 2, top, cw, Math.max(1.5, bot - top));
-  });
-
-  // Draw Trade Levels (Entry, SL, TP1..TP5)
-  if (activeTrade) {
-    const drawLvl = (val, lbl, col) => {
-      if (!val || val < pMin || val > pMax) return;
-      const y = toY(val);
-      ctx.strokeStyle = col;
-      ctx.setLineDash([4, 3]);
-      ctx.beginPath(); ctx.moveTo(ml, y); ctx.lineTo(W - mr, y); ctx.stroke();
-      ctx.setLineDash([]);
-      ctx.fillStyle = col;
-      ctx.fillText(lbl + " " + val.toFixed(2), ml + 6, y - 4);
-    };
-    drawLvl(activeTrade.entry, "E", "#f0b90b");
-    drawLvl(activeTrade.sl, "SL", "#f43f5e");
-    drawLvl(activeTrade.tp1, "TP1", "#10b981");
-    if (chartMode === "1m") {
-      drawLvl(activeTrade.tp2, "TP2", "#10b981");
-      drawLvl(activeTrade.tp3, "TP3", "#10b981");
-      drawLvl(activeTrade.tp4, "TP4", "#10b981");
-      drawLvl(activeTrade.tp5, "TP5", "#10b981");
-    }
-  }
-
-  // Live price horizontal line
-  if (d.price) {
-    const py = toY(d.price);
-    ctx.strokeStyle = "#f0b90b";
-    ctx.lineWidth = 1.2;
-    ctx.beginPath(); ctx.moveTo(ml, py); ctx.lineTo(W - mr, py); ctx.stroke();
-    ctx.fillStyle = "#f0b90b";
-    ctx.fillRect(W - mr + 2, py - 9, 80, 18);
-    ctx.fillStyle = "#000";
-    ctx.font = "bold 11px monospace";
-    ctx.fillText(d.price.toFixed(2), W - mr + 8, py + 4);
-  }
-
-  ctx.fillStyle = "#e6edf3";
-  ctx.font = "bold 12px sans-serif";
-  ctx.fillText((d.broker || "EXNESS").toUpperCase() + " XAUUSD " + chartMode.toUpperCase() + " LIVE", ml + 4, 18);
-}
-
 async function loadState() {
   try {
     const d = await api("/api/state");
     if (!d.ok) return;
-    lastData = d;
     document.getElementById("price").innerText = d.price ? d.price.toFixed(2) : "---";
-    document.getElementById("brk_label").innerText = `XAUUSD (${(d.broker || 'exness').toUpperCase()} ${d.auto_sync ? '🟢 AVTO-SYNC' : '⚪ MANUAL'})`;
-    document.getElementById("sub_prices").innerText = `Exness: ${d.exness_price ? d.exness_price.toFixed(2) : '-'} | XM: ${d.xm_price ? d.xm_price.toFixed(2) : '-'}`;
-    document.getElementById("bal_badge").innerText = `💰 $${(d.balance || 20).toFixed(2)}`;
     document.getElementById("bias").innerText = "15m: " + (d.b15 || "NEUTRAL").toUpperCase();
     document.getElementById("offset").innerText = "Offset: " + (d.offset >= 0 ? "+" : "") + d.offset;
-
-    document.getElementById("btn_ex").style.borderColor = (d.broker === "exness") ? "#f0b90b" : "#2e374f";
-    document.getElementById("btn_xm").style.borderColor = (d.broker === "xm") ? "#f0b90b" : "#2e374f";
-
-    if (chartMode !== "tv") drawLiveChart(d);
-
     const tb = document.getElementById("trade_box");
     if (d.trade) {
-      tb.innerHTML = `<div class="row"><span>Day Bitim:</span><b>${d.trade.signal === "LONG" ? "🟢 BUY" : "🔴 SELL"} @ ${d.trade.entry}</b></div>
+      tb.innerHTML = `<div class="row"><span>Yo'nalish:</span><b>${d.trade.signal === "LONG" ? "BUY" : "SELL"} @ ${d.trade.entry}</b></div>
                       <div class="row"><span>SL / TP:</span><b>${d.trade.sl} / ${d.trade.tp1}</b></div>`;
     } else {
-      tb.innerHTML = `<div class="row"><span>Day Holat:</span><span>15m Sniper zona kutilmoqda</span></div>
-                      <div class="row"><span>EQ (50%) / WR:</span><b>${d.eq15 || '-'} | ${d.wr}</b></div>`;
-    }
-    const ab = document.getElementById("ake_box");
-    if (d.ake_trade) {
-      document.getElementById("ake_work").innerText = "🟢 OCHIQ";
-      ab.innerHTML = `<div class="row"><span>Ake 1m Bitim:</span><b>${d.ake_trade.signal === "LONG" ? "🟢 LONG" : "🔴 SHORT"} @ ${d.ake_trade.entry} (Max: ${d.ake_trade.max_r_hit || 0}R)</b></div>
-                      <div class="row"><span>SL(-1R) / TP1..TP5:</span><b>${d.ake_trade.sl} / ${d.ake_trade.tp1} .. ${d.ake_trade.tp5}</b></div>`;
-    } else {
-      document.getElementById("ake_work").innerText = "⏳ KUTILMOQDA";
-      ab.innerHTML = `<div class="row"><span>Ake 1m Holat:</span><span>1m 2-bosqichli tasdiq kutilmoqda</span></div>`;
-    }
-    if (d.ake_stats && d.ake_stats.day) {
-      const ds = d.ake_stats.day, ws = d.ake_stats.week, ms = d.ake_stats.month;
-      document.getElementById("ake_stats_box").innerHTML =
-        `<div class="row"><span>Kun (${ds.total}):</span><b>TP ${ds.wins} (${ds.wr}%) | Stop ${ds.losses} | Jami ${ds.total_r >= 0 ? '+' : ''}${ds.total_r}R</b></div>` +
-        `<div class="row"><span>Hafta (${ws.total}):</span><b>TP ${ws.wins} (${ws.wr}%) | Jami ${ws.total_r >= 0 ? '+' : ''}${ws.total_r}R</b></div>` +
-        `<div class="row"><span>Oy (${ms.total}):</span><b>TP ${ms.wins} (${ms.wr}%) | Jami ${ms.total_r >= 0 ? '+' : ''}${ms.total_r}R</b></div>`;
+      tb.innerHTML = `<div class="row"><span>Holat:</span><span>Sniper zona kutilmoqda</span></div>
+                      <div class="row"><span>EQ (50%) /WR:</span><b>${d.eq15 || '-'} | ${d.wr}</b></div>`;
     }
     const el = document.getElementById("exness_list");
     el.innerHTML = (d.exness || []).map(a =>
       `<div class="row"><span>#${a.slot} <b>${a.login}</b> (${a.server})</span>
        <span>${a.lot} lot | <a href="#" style="color:var(--gold)" onclick="delEx(${a.slot})">O'chirish</a></span></div>`
-    ).join("") || "Hali hisob ulanmagan (/metaapi_set yoki pastdan ulang)";
+    ).join("") || "Hali hisob ulanmagan";
   } catch (e) {}
 }
 
 async function act(cmd) {
   await api("/api/action", { action: cmd });
   if (tg) tg.showAlert("Buyruq bajarildi: " + cmd);
-  loadState();
-}
-
-async function setBroker(brk) {
-  await api("/api/action", { action: "set_broker", broker: brk });
   loadState();
 }
 
@@ -6536,7 +5475,7 @@ async function delEx(slot) {
 }
 
 loadState();
-setInterval(loadState, 2500);
+setInterval(loadState, 3000);
 </script>
 </body>
 </html>
@@ -6558,47 +5497,16 @@ async def handle_api_state(request):
     if not cid:
         return web.json_response({"ok": False, "error": "Unauthorized"}, status=401)
     trade = await db.state_get("current_trade")
-    ake_trade = await db.state_get("current_trade_ake")
-    ake_stats = await get_ake_stats_summary()
-    acc = await get_account()
     ex_accs = await db.get_exness_accounts(cid)
     wr = await win_rate_text()
-    p = get_unified_price(_LAST_CANDLES_1M or _LAST_CANDLES_15M)
-
-    c1_out = [list(c[:5]) for c in (_LAST_CANDLES_1M[-48:] if _LAST_CANDLES_1M else [])]
-    if c1_out and p is not None:
-        c1_out[-1][4] = p
-        if p > c1_out[-1][2]:
-            c1_out[-1][2] = p
-        if p < c1_out[-1][3]:
-            c1_out[-1][3] = p
-
-    c15_out = [list(c[:5]) for c in (_LAST_CANDLES_15M[-48:] if _LAST_CANDLES_15M else [])]
-    if c15_out and p is not None:
-        c15_out[-1][4] = p
-        if p > c15_out[-1][2]:
-            c15_out[-1][2] = p
-        if p < c15_out[-1][3]:
-            c15_out[-1][3] = p
-
+    p = live_price() or (_LAST_CANDLES_15M[-1][C] if _LAST_CANDLES_15M else None)
     return web.json_response({
         "ok": True,
         "price": p,
-        "broker": _ACTIVE_BROKER,
-        "auto_sync": _AUTO_SYNC_ENABLED,
-        "exness_price": _LAST_SPOT_SYNC_INFO.get("exness_price") or p,
-        "xm_price": _LAST_SPOT_SYNC_INFO.get("xm_price") or (round(p + 0.25, 2) if p else None),
-        "bybit_raw": _LIVE_BYBIT_RAW_PRICE,
         "offset": _CURRENT_OFFSET,
-        "balance": acc.get("balance", DEFAULT_BALANCE_USD),
         "b15": _LAST_STRUCT_15M.get("bias"),
         "eq15": _LAST_STRUCT_15M.get("eq"),
-        "scalp_band": _LAST_AKE_INFO.get("scalp_band"),
-        "candles_1m": c1_out,
-        "candles_15m": c15_out,
         "trade": trade,
-        "ake_trade": ake_trade,
-        "ake_stats": ake_stats,
         "wr": wr,
         "exness": [
             {
@@ -6618,14 +5526,9 @@ async def handle_api_action(request):
     data = await request.json()
     action = data.get("action")
 
-    if action in ("signal", "chart", "ai", "close", "ake", "ake_chart", "ake_stats", "ake_close", "autosync"):
+    if action in ("signal", "chart", "ai", "close"):
         await handle_command(session, cid, f"/{action}")
         return web.json_response({"ok": True, "msg": f"/{action} yuborildi"})
-
-    if action == "set_broker":
-        brk = str(data.get("broker", "exness")).lower()
-        await handle_command(session, cid, f"/broker {brk}")
-        return web.json_response({"ok": True, "broker": _ACTIVE_BROKER})
 
     if action == "sync":
         broker_p = float(data["price"])
@@ -6650,172 +5553,17 @@ async def handle_api_action(request):
     return web.json_response({"ok": False, "msg": "Noma'lum amal"}, status=400)
 
 async def handle_mt5_bridge_poll(request):
-    """Termux Auto-Trader (termux_autotrader.py) ushbu endpoint orqali yangi signallar va SL/Close buyruqlarini oladi."""
+    """Bepul Cloud Bridge: Tashqi MT5 terminal yoki EA ushbu endpoint orqali signallarni oladi."""
     token = request.headers.get("X-Bridge-Token") or request.query.get("token", "")
     if DASHBOARD_TOKEN and token != DASHBOARD_TOKEN:
         return web.json_response({"ok": False, "error": "Invalid token"}, status=403)
-
-    now_s = int(time.time())
-    # Faqat oxirgi 10 daqiqa ichidagi va hali bajarilmagan (pending) buyruqlarni yuboramiz
-    pending = [
-        item for item in _BRIDGE_SIGNALS_QUEUE
-        if item.get("status") == "pending" and (now_s - int(item.get("ts", 0))) <= 600
-    ]
-    trade_day = await db.state_get("current_trade")
-    trade_ake = await db.state_get("current_trade_ake")
-    ex_mode = await db.state_get("exness_mode", EXNESS_AUTOTRADE_DEFAULT_MODE)
-
-    # Agar foydalanuvchi Telegram'da /exness_add orqali hisob qo'shgan bo'lsa, Termux avtomatik olishi uchun:
-    saved_accs = []
-    for a in await db.get_all_active_exness_accounts():
-        try:
-            pw_plain = decrypt_secret(a["password_enc"])
-        except Exception:
-            pw_plain = ""
-        saved_accs.append({
-            "slot": a["slot"],
-            "login": a["login"],
-            "password": pw_plain,
-            "server": a["server"],
-            "symbol": a["symbol"],
-            "lot": a["lot"],
-        })
-
+    trade = await db.state_get("current_trade")
     return web.json_response({
         "ok": True,
-        "exness_mode": ex_mode,
-        "active_broker": _ACTIVE_BROKER,
-        "active_trade_day": trade_day,
-        "active_trade_ake": trade_ake,
-        "pending_commands": pending,
+        "active_trade": trade,
         "recent_signals": _BRIDGE_SIGNALS_QUEUE[-10:],
-        "saved_accounts": saved_accs,
-        "server_time": now_s,
+        "server_time": int(time.time()),
     })
-
-async def handle_mt5_bridge_heartbeat(request):
-    """Termux Auto-Trader har 2 soniyada Exness/XM dagi jonli narx va balansni shu yerga yuboradi."""
-    global _LIVE_PRICE, _LIVE_PRICE_TS, _LAST_SPOT_SYNC_INFO
-    token = request.headers.get("X-Bridge-Token") or request.query.get("token", "")
-    if DASHBOARD_TOKEN and token != DASHBOARD_TOKEN:
-        return web.json_response({"ok": False, "error": "Invalid token"}, status=403)
-
-    try:
-        data = await request.json()
-    except Exception:
-        return web.json_response({"ok": False, "error": "Bad JSON"}, status=400)
-
-    was_offline = (time.time() - _TERMUX_BRIDGE_STATE.get("last_seen", 0)) > 60
-    _TERMUX_BRIDGE_STATE["online"] = True
-    _TERMUX_BRIDGE_STATE["last_seen"] = time.time()
-    for k in ("login", "server", "symbol", "driver"):
-        if data.get(k) is not None:
-            _TERMUX_BRIDGE_STATE[k] = data.get(k)
-
-    bid = data.get("bid")
-    ask = data.get("ask")
-    bal = data.get("balance")
-
-    if bid is not None and ask is not None:
-        try:
-            b_val = float(bid)
-            a_val = float(ask)
-            if b_val > 1000 and a_val > 1000:
-                _TERMUX_BRIDGE_STATE["bid"] = round(b_val, 2)
-                _TERMUX_BRIDGE_STATE["ask"] = round(a_val, 2)
-                mid_p = round((b_val + a_val) / 2.0, 2)
-                _LIVE_PRICE = mid_p
-                _LIVE_PRICE_TS = time.monotonic()
-                if _LIVE_BYBIT_RAW_PRICE:
-                    new_off = round(mid_p - _LIVE_BYBIT_RAW_PRICE, 2)
-                    if abs(new_off - _CURRENT_OFFSET) >= 0.08:
-                        await apply_offset_change(new_off)
-        except Exception:
-            pass
-
-    if bal is not None:
-        try:
-            bal_f = round(float(bal), 2)
-            if bal_f >= 0.5:
-                _TERMUX_BRIDGE_STATE["balance"] = bal_f
-                await update_account(balance=bal_f)
-        except Exception:
-            pass
-
-    if was_offline and data.get("login"):
-        session = request.app["session"]
-        _spawn(send_telegram(
-            session,
-            f"📱 <b>Termux Avto-Trade ulandi!</b>\n"
-            f"Hisob: <code>{html.escape(str(data.get('login')))}</code> ({html.escape(str(data.get('server', 'MT5')))})\n"
-            f"Simbol: <code>{html.escape(str(data.get('symbol', 'XAUUSDm')))}</code> | "
-            f"Jonli narx: <code>{_TERMUX_BRIDGE_STATE.get('bid') or '-'}</code> | "
-            f"Balans: <b>${_TERMUX_BRIDGE_STATE.get('balance') or '-'}</b>",
-        ))
-
-    return web.json_response({"ok": True, "unified_price": get_unified_price()})
-
-async def handle_mt5_bridge_report(request):
-    """Termux Auto-Trader order ochganda, SL o'zgartirganda yoki yopganda natijani shu yerga yuboradi."""
-    token = request.headers.get("X-Bridge-Token") or request.query.get("token", "")
-    if DASHBOARD_TOKEN and token != DASHBOARD_TOKEN:
-        return web.json_response({"ok": False, "error": "Invalid token"}, status=403)
-
-    try:
-        data = await request.json()
-    except Exception:
-        return web.json_response({"ok": False, "error": "Bad JSON"}, status=400)
-
-    cmd_id = data.get("id")
-    for item in _BRIDGE_SIGNALS_QUEUE:
-        if item.get("id") == cmd_id:
-            item["status"] = "done" if data.get("ok") else "error"
-            break
-
-    session = request.app["session"]
-    act = data.get("action", "OPEN")
-    ok = data.get("ok", False)
-    login = data.get("login", "MT5")
-    msg_txt = data.get("msg", "")
-    price = data.get("price")
-    sl = data.get("sl")
-    tp = data.get("tp")
-    lot = data.get("lot", 0.01)
-    sig = data.get("signal", "LONG")
-    bal = data.get("balance")
-
-    if bal is not None:
-        try:
-            if float(bal) >= 0.5:
-                await update_account(balance=round(float(bal), 2))
-        except Exception:
-            pass
-
-    if ok:
-        if act == "OPEN":
-            await send_telegram(
-                session,
-                f"✅ <b>[Termux MT5 Auto-Trade] {side_txt(sig)} ochildi!</b>\n"
-                f"Hisob: <code>{html.escape(str(login))}</code> | Lot: <code>{lot}</code>\n"
-                f"Narx: <code>{price}</code> | SL: <code>{sl}</code> | TP: <code>{tp}</code>",
-            )
-        elif act == "MODIFY_SL":
-            await send_telegram(
-                session,
-                f"🛡 <b>[Termux MT5] SL muvaffaqiyatli ko'chirildi ➡️ <code>{sl}</code></b>",
-            )
-        elif act == "CLOSE":
-            await send_telegram(
-                session,
-                f"🏁 <b>[Termux MT5] Ochiq bitim yopildi!</b>" + (f" | 💰 Balans: <b>${float(bal):.2f}</b>" if bal else ""),
-            )
-    else:
-        await send_telegram(
-            session,
-            f"⚠️ <b>[Termux MT5 Xato ({html.escape(str(act))})]:</b> {html.escape(str(msg_txt))}",
-        )
-
-    return web.json_response({"ok": True})
 
 async def handle_webhook(request):
     if WEBHOOK_SECRET:
@@ -6870,20 +5618,11 @@ async def telegram_polling_loop(app):
 
 # ==================== APP LIFECYCLE & MAIN ====================
 async def on_startup(app):
-    global _CURRENT_OFFSET, _CURRENT_GEMINI_MODEL, _ACTIVE_BROKER, _AUTO_SYNC_ENABLED, _BROKER_CALIBRATION
+    global _CURRENT_OFFSET, _CURRENT_GEMINI_MODEL
     await db.init()
     saved_off = await db.state_get("price_offset")
     if saved_off is not None:
         _CURRENT_OFFSET = float(saved_off)
-    saved_brk = await db.state_get("active_broker")
-    if saved_brk in ("exness", "xm"):
-        _ACTIVE_BROKER = saved_brk
-    saved_as = await db.state_get("auto_sync_enabled")
-    if saved_as is not None:
-        _AUTO_SYNC_ENABLED = bool(saved_as)
-    saved_cal = await db.state_get("broker_calibration")
-    if isinstance(saved_cal, dict):
-        _BROKER_CALIBRATION.update(saved_cal)
     saved_mod = await db.state_get("gemini_model")
     if saved_mod and _GEMINI_NAME_RE.fullmatch(str(saved_mod)):
         _CURRENT_GEMINI_MODEL = str(saved_mod)
@@ -6931,8 +5670,6 @@ def create_app():
     app.router.add_get("/api/state", handle_api_state)
     app.router.add_post("/api/action", handle_api_action)
     app.router.add_get("/api/mt5_bridge/poll", handle_mt5_bridge_poll)
-    app.router.add_post("/api/mt5_bridge/heartbeat", handle_mt5_bridge_heartbeat)
-    app.router.add_post("/api/mt5_bridge/report", handle_mt5_bridge_report)
     app.router.add_post("/webhook", handle_webhook)
 
     webapp_dir = os.path.join(BASE_DIR, "webapp")
