@@ -3625,8 +3625,13 @@ async def monitor_trade(session, price, bias15):
             await db.state_set("current_trade", trade)
             if trade["sl"] != old_sl and not to_close:
                 _spawn(sync_exness_positions_action(action="modify_sl", new_sl=trade["sl"]))
-        for n in notes:
-            await send_telegram(session, n)
+        if notes:
+            for n in notes:
+                n_refs = await send_telegram(session, n)
+                if n_refs:
+                    cur_ids = await db.state_get("ake_active_trade_msg_ids", [])
+                    cur_ids.extend(n_refs)
+                    await db.state_set("ake_active_trade_msg_ids", cur_ids)
         if to_close:
             await close_trade(session, trade, *to_close)
 
@@ -4524,6 +4529,7 @@ async def get_ake_stats_summary():
 
 async def format_ake_stats_table_message():
     st = await get_ake_stats_summary()
+    acc = await get_account()
     d, w, m = st["day"], st["week"], st["month"]
     ake_open = await db.state_get("current_trade_ake")
     in_work = 1 if ake_open else 0
@@ -4541,6 +4547,7 @@ async def format_ake_stats_table_message():
     m_rul = f"{m['rule_r']:+.1f}R ({m['rule_avg_r']:+.1f})"
     lines = [
         "⚡ <b>Ake signals 7 · 1m (O'zbekcha Statistika Jadvali)</b>",
+        f"💰 <b>Joriy Balans: ${acc['balance']:.2f}</b> | Standart Lot: <code>0.01</code>",
         "<pre>",
         f"{'Ko`rsatkich':<15} | {'Kun':<13} | {'Hafta':<13} | {'Oy':<13}",
         "-" * 61,
@@ -4632,26 +4639,27 @@ async def close_ake_trade(session, trade, price, reason_label="SL"):
         peak_r = float(max_hit)
         if reason_label == "TP5":
             rule_r = 5.0
-        elif reason_label == "TRAIL_SL":
-            # TP1 olinganda +0.35R qulflangani uchun kamida +0.35R, TP2+ da esa max_hit - 1 R
+            res_code = "TP5 (+5.0R MAX)"
+            icon = "🎯"
+            status_title = "TP5 (+5.0R) to'liq olindi va yopildi!"
+        elif reason_label in ("TRAIL_SL", "SL"):
             rule_r = 0.35 if max_hit == 1 else float(max_hit - 1)
+            res_code = f"TP{max_hit} (+{peak_r:.1f}R)"
+            icon = "🛡"
+            status_title = f"Ko'chirilgan SL ga tegdi va foydada yopildi! (Rekord TP: +{peak_r:.1f}R)"
         else:
             rule_r = round(raw_r, 2)
-        res_code = f"TP{max_hit} (+{peak_r:.1f}R)"
-        icon = "✅"
+            res_code = f"TP{max_hit} (+{peak_r:.1f}R)"
+            icon = "✅"
+            status_title = f"Bitim yopildi — {res_code}"
     else:
-        if reason_label in ("SL", "STOP_-1R"):
-            peak_r = -1.0
-            rule_r = -1.0
-            res_code = "Stop -1R"
-            icon = "❌"
-        else:
-            peak_r = -1.0 if raw_r < 0 else round(raw_r, 1)
-            rule_r = round(raw_r, 2)
-            res_code = f"{reason_label} ({rule_r:+.1f}R)"
-            icon = "🔄" if raw_r >= 0 else "❌"
+        peak_r = -1.0
+        rule_r = -1.0
+        res_code = "Stop -1R"
+        icon = "❌"
+        status_title = "⚠️ STOP LOSS (-1R) URILDI! Bitim yopildi."
 
-    lot = trade.get("lot", XM_MIN_LOT)
+    lot = float(trade.get("lot") or XM_MIN_LOT)
     risk_usd = trade.get("risk_usd", round(risk_pts, 2))
     try:
         await db.insert_ake_trade(
@@ -4669,29 +4677,36 @@ async def close_ake_trade(session, trade, price, reason_label="SL"):
         "magic": MT5_MAGIC_AKE,
         "symbol": "XAUUSDm",
         "price": float(price),
+        "reason": reason_label,
     })
     ex_mode = await db.state_get("exness_mode", EXNESS_AUTOTRADE_DEFAULT_MODE)
     if ex_mode in ("ake", "both"):
-        _spawn(sync_exness_positions_action(action="close"))
+        _spawn(sync_exness_positions_action(action="close", engine="ake"))
 
-    effective_r_for_bal = peak_r if max_hit >= 1 else rule_r
-    pnl_usd = round((float(lot) / XM_MIN_LOT) * (effective_r_for_bal * risk_pts) * XM_OZ_PER_MIN_LOT, 2)
+    # Haqiqiy pul hisob-kitobi (0.01 lot uchun 1R taxminan $3.00)
+    effective_r_for_bal = rule_r if (max_hit >= 1 and reason_label == "TRAIL_SL") else (peak_r if max_hit >= 1 else -1.0)
+    pnl_usd = round((lot / XM_MIN_LOT) * (effective_r_for_bal * risk_pts) * XM_OZ_PER_MIN_LOT, 2)
     new_balance = await apply_pnl_to_balance(pnl_usd)
+    logger.info(f"💰 [Ake signals 7] Yangi Balans: ${new_balance:.2f} (Natija: {pnl_usd:+.2f}$)")
 
     st = await get_ake_stats_summary()
     d = st["day"]
-    sl_alert = " ⚠️ <b>STOP LOSS URILDI!</b>\n" if (peak_r < 0 or "Stop" in res_code) else ""
-    await send_telegram(
-        session,
-        f"{icon} <b>[Ake signals 7 · 1m] {side_txt(trade['signal'])} yopildi</b> — <b>{html.escape(res_code)}</b>\n"
-        f"{sl_alert}"
-        f"Kirish: <code>{entry:.2f}</code> ➡️ Yopildi: <code>{price:.2f}</code> | Rekord TP: <b>{peak_r:+.1f}R</b>\n"
-        f"💵 Natija: <b>{pnl_usd:+.2f}$</b> | 💰 Umumiy Balans: <b>${new_balance:.2f}</b>\n"
+    close_msg = (
+        f"{icon} <b>[Ake signals 7 · 1m] {side_txt(trade['signal'])}: {status_title}</b>\n"
+        f"Kirish: <code>{entry:.2f}</code> ➡️ Yopildi: <code>{price:.2f}</code>\n"
+        f"💵 Natija: <b>{pnl_usd:+.2f}$</b> ({effective_r_for_bal:+.2f}R) | 💰 <b>Yangi Balans: ${new_balance:.2f}</b>\n"
         f"📊 Bugun (Kun): <b>{d['total']}</b> bitim | TP olindi: <b>{d['wins']} ({d['wr']}%)</b> | "
-        f"Stop -1R: <b>{d['losses']}</b> | Jami: <b>{d['total_r']:+.1f}R</b>",
+        f"Stop -1R: <b>{d['losses']}</b> | Jami: <b>{d['total_r']:+.1f}R</b>"
     )
+    # Ushbu xabar chatda QOLADI (yangi signal ochilganda avvalgi xabarlar tozalanadi)
+    sent_close_refs = await send_telegram(session, close_msg, with_keyboard=True)
+    # Xabarlar ID sini saqlash
+    existing_ids = await db.state_get("ake_active_trade_msg_ids", [])
+    if sent_close_refs:
+        existing_ids.extend(sent_close_refs)
+    await db.state_set("ake_active_trade_msg_ids", existing_ids)
 
-async def monitor_ake_trade(session, price):
+async def monitor_ake_trade(session, price, candle_high=None, candle_low=None):
     if _ake_monitor_lock.locked():
         return
     async with _ake_monitor_lock:
@@ -4707,7 +4722,10 @@ async def monitor_ake_trade(session, price):
         notes = []
 
         def reached(lvl):
-            return price >= lvl if is_long else price <= lvl
+            if is_long:
+                return (price >= lvl) or (candle_high is not None and candle_high >= lvl)
+            else:
+                return (price <= lvl) or (candle_low is not None and candle_low <= lvl)
 
         for k in range(1, 6):
             tp_lvl = float(trade[f"tp{k}"])
@@ -4768,7 +4786,10 @@ async def monitor_ake_trade(session, price):
             )
 
         sl_lvl = float(trade["sl"])
-        sl_hit = (is_long and price <= sl_lvl) or ((not is_long) and price >= sl_lvl)
+        if is_long:
+            sl_hit = (price <= sl_lvl) or (candle_low is not None and candle_low <= sl_lvl)
+        else:
+            sl_hit = (price >= sl_lvl) or (candle_high is not None and candle_high >= sl_lvl)
         if sl_hit:
             lbl = "TRAIL_SL" if max_hit >= 1 else "STOP_-1R"
             await close_ake_trade(session, trade, sl_lvl, reason_label=lbl)
@@ -4811,7 +4832,9 @@ async def scanner_loop(app):
 
                     ake_trade = await db.state_get("current_trade_ake")
                     if ake_trade:
-                        await monitor_ake_trade(session, price)
+                        c_h = cl1_ake[-1][H] if cl1_ake else None
+                        c_l = cl1_ake[-1][L] if cl1_ake else None
+                        await monitor_ake_trade(session, price, candle_high=c_h, candle_low=c_l)
                         ake_trade = await db.state_get("current_trade_ake")
 
                     ake_cand = ake_info.get("candidate")
@@ -4838,9 +4861,16 @@ async def scanner_loop(app):
                                 last_ake_bar_ts = ake_bar_key
                                 last_ake_signal_time = time.time()
 
+                            # Avvalgi bitimning barcha xabarlarini (signal, grafik, maslahatlar) tozalash
+                            old_trade_msgs = await db.state_get("ake_active_trade_msg_ids", [])
+                            if old_trade_msgs:
+                                _spawn(delete_tracked_messages(session, old_trade_msgs))
+                                await db.state_set("ake_active_trade_msg_ids", [])
+
                             acc_ake = await get_account()
                             ake_msg = format_ake_signal_message(ake_cand, balance=acc_ake["balance"])
-                            await send_telegram(session, ake_msg, with_keyboard=True)
+                            new_trade_refs = await send_telegram(session, ake_msg, with_keyboard=True)
+                            cur_trade_ids = list(new_trade_refs or [])
 
                             ake_stats_now = await get_ake_stats_summary()
                             ake_png = await render_ake_chart_async(
@@ -4848,7 +4878,7 @@ async def scanner_loop(app):
                                 scalp_band=ake_info.get("scalp_band"), zones_1m=ake_info.get("zones_1m")
                             )
                             if ake_png:
-                                await send_telegram_photo(
+                                p_refs = await send_telegram_photo(
                                     session, ake_png,
                                     caption=(
                                         f"⚡ <b>Ake signals 7 [1m] {side_txt(ake_cand['signal'])}</b> | "
@@ -4856,6 +4886,9 @@ async def scanner_loop(app):
                                         f"TP1: {ake_cand['tp1']} .. TP5: {ake_cand['tp5']}"
                                     ),
                                 )
+                                if p_refs:
+                                    cur_trade_ids.extend(p_refs)
+                            await db.state_set("ake_active_trade_msg_ids", cur_trade_ids)
 
                             ex_mode = await db.state_get("exness_mode", EXNESS_AUTOTRADE_DEFAULT_MODE)
                             if ex_mode in ("ake", "both"):
@@ -5811,12 +5844,13 @@ async def handle_mt5_bridge_poll(request):
         return web.json_response({"ok": False, "error": "Invalid token"}, status=403)
     trade = await db.state_get("current_trade")
     ake_trade = await db.state_get("current_trade_ake")
+    all_signals = list(_BRIDGE_SIGNALS_QUEUE)
     return web.json_response({
         "ok": True,
         "active_trade": trade,
         "active_ake_trade": ake_trade,
-        "recent_signals": _BRIDGE_SIGNALS_QUEUE[-20:],
-        "recent_ake_signals": _AKE_BRIDGE_SIGNALS_QUEUE[-20:],
+        "recent_signals": all_signals[-30:],
+        "recent_ake_signals": _AKE_BRIDGE_SIGNALS_QUEUE[-30:],
         "server_time": int(time.time()),
     })
 
