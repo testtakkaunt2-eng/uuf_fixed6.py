@@ -875,7 +875,10 @@ def _mt5_test_login_sync(login_id, password, server):
 
     return {"ok": False, "msg": f"Login/Parol yoki Server xato: {last_err}"}
 
-def _mt5_open_order_sync(login_id, password, server, side, lot, sl, tp, preferred_sym="XAUUSDm", entry_ref=None):
+MT5_MAGIC_DAY = 202619
+MT5_MAGIC_AKE = 202620
+
+def _mt5_open_order_sync(login_id, password, server, side, lot, sl, tp, preferred_sym="XAUUSDm", entry_ref=None, magic=MT5_MAGIC_DAY, comment="SMC_v19_Sniper"):
     """Exness haqiqiy Bid/Ask narxiga nisbatan SL/TP masofasini aniq saqlab order ochish."""
     if not _HAS_MT5:
         return {"ok": False, "mode": "cloud_bridge", "msg": "Cloud Bridge navbatiga qo'shildi"}
@@ -917,8 +920,8 @@ def _mt5_open_order_sync(login_id, password, server, side, lot, sl, tp, preferre
             "sl": round(adj_sl, digits),
             "tp": round(adj_tp, digits),
             "deviation": 35,
-            "magic": 202619,
-            "comment": "SMC_v19_Sniper",
+            "magic": int(magic),
+            "comment": str(comment),
             "type_time": mt5.ORDER_TIME_GTC,
             "type_filling": fill_mode,
         }
@@ -937,10 +940,10 @@ def _mt5_open_order_sync(login_id, password, server, side, lot, sl, tp, preferre
             }
 
     code = res.retcode if res else "None"
-    comment = res.comment if res else str(mt5.last_error())
-    return {"ok": False, "msg": f"Order xato ({code}): {comment}"}
+    comment_err = res.comment if res else str(mt5.last_error())
+    return {"ok": False, "msg": f"Order xato ({code}): {comment_err}"}
 
-def _mt5_modify_or_close_sync(login_id, password, server, action="close", new_sl=None):
+def _mt5_modify_or_close_sync(login_id, password, server, action="close", new_sl=None, magic=MT5_MAGIC_DAY):
     if not _HAS_MT5:
         return {"ok": False, "msg": "MT5 yo'q"}
     init_kwargs = {"login": int(login_id), "password": str(password), "server": str(server)}
@@ -949,7 +952,7 @@ def _mt5_modify_or_close_sync(login_id, password, server, action="close", new_sl
     if not mt5.initialize(**init_kwargs) or not mt5.login(login=int(login_id), password=str(password), server=str(server)):
         return {"ok": False, "msg": "MT5 login xato"}
 
-    positions = mt5.positions_get(magic=202619)
+    positions = mt5.positions_get(magic=int(magic))
     if not positions:
         return {"ok": True, "count": 0}
 
@@ -973,7 +976,7 @@ def _mt5_modify_or_close_sync(login_id, password, server, action="close", new_sl
                     "type": close_type,
                     "price": round(close_price, digits),
                     "deviation": 35,
-                    "magic": 202619,
+                    "magic": int(magic),
                     "type_filling": fill_mode,
                 }
                 r = mt5.order_send(req)
@@ -1015,20 +1018,28 @@ async def test_exness_account(acc):
 
 async def execute_exness_autotrades(session, trade):
     accounts = await db.get_all_active_exness_accounts()
-    if not accounts:
-        return
+    is_ake = trade.get("engine") == "AKE_SIGNALS_7"
+    magic = MT5_MAGIC_AKE if is_ake else MT5_MAGIC_DAY
+    comment = "Ake_1m_Scalp" if is_ake else "SMC_v19_Sniper"
+    tp_target = trade.get("tp5") if is_ake else (trade.get("tp2") or trade["tp1"])
 
-    tp_target = trade.get("tp2") or trade["tp1"]
-    if len(_BRIDGE_SIGNALS_QUEUE) >= 100:
-        _BRIDGE_SIGNALS_QUEUE.pop(0)
-    _BRIDGE_SIGNALS_QUEUE.append({
+    sig_payload = {
         "ts": int(time.time()),
+        "engine": "ake" if is_ake else "day",
+        "magic": magic,
         "signal": trade["signal"],
         "entry": trade["entry"],
         "sl": trade["sl"],
         "tp1": trade["tp1"],
-        "tp2": tp_target,
-    })
+        "tp_final": tp_target,
+    }
+    target_q = _AKE_BRIDGE_SIGNALS_QUEUE if is_ake else _BRIDGE_SIGNALS_QUEUE
+    if len(target_q) >= 100:
+        target_q.pop(0)
+    target_q.append(sig_payload)
+
+    if not accounts:
+        return
 
     for acc in accounts:
         try:
@@ -1045,6 +1056,7 @@ async def execute_exness_autotrades(session, trade):
                     acc["login"], pw, acc["server"],
                     trade["signal"], lot, trade["sl"], tp_target,
                     acc.get("symbol", "XAUUSDm"), trade["entry"],
+                    magic, comment,
                 )
             if res.get("ok"):
                 await db.update_exness_status(
@@ -1054,7 +1066,7 @@ async def execute_exness_autotrades(session, trade):
                 )
                 await send_telegram(
                     session,
-                    f"✅ <b>Exness #{acc['slot']}: {side_txt(trade['signal'])} ochildi</b>\n"
+                    f"✅ <b>Exness #{acc['slot']} ({'Ake 1m' if is_ake else 'Day 15m'}): {side_txt(trade['signal'])} ochildi</b>\n"
                     f"Lot: <code>{lot}</code> | Narx: <code>{res.get('price')}</code> | "
                     f"SL: <code>{res.get('sl')}</code> | TP: <code>{res.get('tp')}</code>",
                     chat_id=acc["chat_id"],
@@ -1069,12 +1081,13 @@ async def execute_exness_autotrades(session, trade):
         else:
             await db.update_exness_status(
                 acc["chat_id"], acc["slot"],
-                status_text=f"Signal: {side_txt(trade['signal'])} @ {trade['entry']}",
+                status_text=f"Signal ({'Ake' if is_ake else 'Day'}): {side_txt(trade['signal'])} @ {trade['entry']}",
             )
 
-async def sync_exness_positions_action(action="close", new_sl=None):
+async def sync_exness_positions_action(action="close", new_sl=None, engine="day"):
     if not _HAS_MT5:
         return
+    magic = MT5_MAGIC_AKE if engine == "ake" else MT5_MAGIC_DAY
     accounts = await db.get_all_active_exness_accounts()
     for acc in accounts:
         try:
@@ -1082,7 +1095,7 @@ async def sync_exness_positions_action(action="close", new_sl=None):
             async with _mt5_lock:
                 loop = asyncio.get_running_loop()
                 await loop.run_in_executor(
-                    None, _mt5_modify_or_close_sync, acc["login"], pw, acc["server"], action, new_sl
+                    None, _mt5_modify_or_close_sync, acc["login"], pw, acc["server"], action, new_sl, magic
                 )
         except Exception as e:
             logger.warning(f"Exness {action} xato ({acc['login']}): {_safe_log_error(e)}")
@@ -3315,6 +3328,43 @@ async def delete_telegram_message(session, chat_id, message_id):
     except Exception:
         pass
 
+async def delete_tracked_messages(session, refs):
+    """refs: [{"chat_id":..., "message_id":...}, ...] — yangi bitim ochilganda eski 'bitim ochildi' xabarlarini tozalash uchun."""
+    if not refs:
+        return
+    for ref in refs:
+        await delete_telegram_message(session, ref.get("chat_id"), ref.get("message_id"))
+
+async def set_telegram_bot_commands(session):
+    """Telegram '/' buyruqlar menyusini (chat ichidagi Menu tugmasi) serverda doimiy o'rnatadi/yangilaydi.
+    Shu chaqiruv bo'lmasa, menyu ba'zan bo'sh yoki eskirgan holatda qolib ketishi mumkin."""
+    commands = [
+        {"command": "start", "description": "Botni ishga tushirish / yordam"},
+        {"command": "signal", "description": "Day Trading hozirgi holati"},
+        {"command": "chart", "description": "Day Trading grafigi"},
+        {"command": "zones", "description": "Day Trading kirish zonalari"},
+        {"command": "ake", "description": "Ake Signals 7 (1m) holati"},
+        {"command": "ake_chart", "description": "Ake Signals 7 grafigi"},
+        {"command": "ake_stats", "description": "Ake Signals 7 statistikasi"},
+        {"command": "stats", "description": "Day Trading natijalari"},
+        {"command": "exness", "description": "Exness hisoblar ro'yxati"},
+        {"command": "exness_mode", "description": "Avto-savdo rejimi: day / ake / both"},
+        {"command": "balance", "description": "Balansni qo'lda o'rnatish"},
+        {"command": "risk", "description": "Risk foizini o'rnatish"},
+        {"command": "sync", "description": "Narxni brokerga moslash"},
+        {"command": "close", "description": "Ochiq Day bitimni yopish"},
+        {"command": "ai", "description": "AI tahlil"},
+    ]
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/setMyCommands"
+    try:
+        async with session.post(url, json={"commands": commands}, timeout=T(10)) as r:
+            if r.status == 200:
+                logger.info("✅ Telegram command menyusi o'rnatildi")
+            else:
+                logger.warning(f"Command menyusini o'rnatishda xato (status={r.status})")
+    except Exception as e:
+        logger.warning(f"Command menyusini o'rnatishda xato: {_safe_log_error(e)}")
+
 async def send_telegram(session, text, with_keyboard=False, chat_id=None, parse_mode="HTML", auto_delete_after=None):
     if chat_id:
         targets = [chat_id]
@@ -3340,6 +3390,7 @@ async def send_telegram(session, text, with_keyboard=False, chat_id=None, parse_
     }) if with_keyboard else None
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
     chunks = _split_text(text)
+    sent_refs = []
 
     for target in targets:
         for ci, chunk in enumerate(chunks):
@@ -3360,6 +3411,8 @@ async def send_telegram(session, text, with_keyboard=False, chat_id=None, parse_
                             try:
                                 data = await r.json()
                                 mid = data.get("result", {}).get("message_id")
+                                if mid:
+                                    sent_refs.append({"chat_id": target, "message_id": mid})
                                 if auto_delete_after and mid:
                                     _spawn(_delayed_delete_telegram_message(session, target, mid, delay_sec=auto_delete_after))
                             except Exception:
@@ -3375,6 +3428,7 @@ async def send_telegram(session, text, with_keyboard=False, chat_id=None, parse_
                     _metrics["tg_errors"] += 1
                     break
         await asyncio.sleep(0.05)
+    return sent_refs
 
 async def send_telegram_photo(session, png_bytes, caption="", chat_id=None, auto_delete_after=None):
     if not png_bytes:
@@ -3387,6 +3441,7 @@ async def send_telegram_photo(session, png_bytes, caption="", chat_id=None, auto
             allowed = await _allowed_ids()
             targets = [t for t in targets if str(t) in allowed]
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendPhoto"
+    sent_refs = []
 
     for target in targets:
         use_html = True
@@ -3403,6 +3458,8 @@ async def send_telegram_photo(session, png_bytes, caption="", chat_id=None, auto
                         try:
                             p_data = await r.json()
                             p_mid = p_data.get("result", {}).get("message_id")
+                            if p_mid:
+                                sent_refs.append({"chat_id": target, "message_id": p_mid})
                             if auto_delete_after and p_mid:
                                 _spawn(_delayed_delete_telegram_message(session, target, p_mid, delay_sec=auto_delete_after))
                         except Exception:
@@ -3420,12 +3477,14 @@ async def send_telegram_photo(session, png_bytes, caption="", chat_id=None, auto
                 logger.error(f"TG photo xato ({target}): {_safe_log_error(e)}")
                 break
         await asyncio.sleep(0.05)
+    return sent_refs
 
 # ==================== TRADING MANAGEMENT & SAFE OFFSET SHIFT ====================
 async def apply_offset_change(new_off):
     """Offset o'zgarganda ochiq bitim darajalari ham siljitiladi va Exness SL yangilanadi."""
     global _CURRENT_OFFSET, _LIVE_PRICE
     new_sl_to_sync = None
+    new_ake_sl_to_sync = None
     async with _monitor_lock:
         delta = round(new_off - _CURRENT_OFFSET, 2)
         _CURRENT_OFFSET = new_off
@@ -3445,10 +3504,13 @@ async def apply_offset_change(new_off):
             for k in ("entry", "sl", "initial_sl", "tp1", "tp2", "tp3", "tp4", "tp5"):
                 if t_ake.get(k) is not None:
                     t_ake[k] = round(t_ake[k] + delta, 2)
+            new_ake_sl_to_sync = t_ake.get("sl")
             await db.state_set("current_trade_ake", t_ake)
     clear_analysis_caches()
     if new_sl_to_sync is not None:
         _spawn(sync_exness_positions_action(action="modify_sl", new_sl=new_sl_to_sync))
+    if new_ake_sl_to_sync is not None:
+        _spawn(sync_exness_positions_action(action="modify_sl", new_sl=new_ake_sl_to_sync, engine="ake"))
     return delta
 
 async def close_trade(session, trade, result, price):
@@ -4555,7 +4617,7 @@ async def close_ake_trade(session, trade, price, reason_label="SL"):
     await db.state_set("current_trade_ake", None)
     ex_mode = await db.state_get("exness_mode", EXNESS_AUTOTRADE_DEFAULT_MODE)
     if ex_mode in ("ake", "both"):
-        _spawn(sync_exness_positions_action(action="close"))
+        _spawn(sync_exness_positions_action(action="close", engine="ake"))
 
     effective_r_for_bal = peak_r if max_hit >= 1 else rule_r
     pnl_usd = round((float(lot) / XM_MIN_LOT) * (effective_r_for_bal * risk_pts) * XM_OZ_PER_MIN_LOT, 2)
@@ -4638,7 +4700,7 @@ async def monitor_ake_trade(session, price):
             await db.state_set("current_trade_ake", trade)
             ex_mode = await db.state_get("exness_mode", EXNESS_AUTOTRADE_DEFAULT_MODE)
             if ex_mode in ("ake", "both"):
-                _spawn(sync_exness_positions_action(action="modify_sl", new_sl=trade["sl"]))
+                _spawn(sync_exness_positions_action(action="modify_sl", new_sl=trade["sl"], engine="ake"))
         for n in notes:
             await send_telegram(session, n)
 
@@ -4698,9 +4760,14 @@ async def scanner_loop(app):
                                 last_ake_bar_ts = ake_bar_key
                                 last_ake_signal_time = time.time()
 
+                            # Eski 'bitim ochildi' xabarlarini (matn + grafik) o'chirish — faqat faol bitim qolsin
+                            old_ake_refs = await db.state_get("ake_open_msg_ids", [])
+                            if old_ake_refs:
+                                _spawn(delete_tracked_messages(session, old_ake_refs))
+
                             acc_ake = await get_account()
                             ake_msg = format_ake_signal_message(ake_cand, balance=acc_ake["balance"])
-                            await send_telegram(session, ake_msg, with_keyboard=True)
+                            new_ake_refs = await send_telegram(session, ake_msg, with_keyboard=True)
 
                             ake_stats_now = await get_ake_stats_summary()
                             ake_png = await render_ake_chart_async(
@@ -4708,7 +4775,7 @@ async def scanner_loop(app):
                                 scalp_band=ake_info.get("scalp_band"), zones_1m=ake_info.get("zones_1m")
                             )
                             if ake_png:
-                                await send_telegram_photo(
+                                ake_photo_refs = await send_telegram_photo(
                                     session, ake_png,
                                     caption=(
                                         f"⚡ <b>Ake signals 7 [1m] {side_txt(ake_cand['signal'])}</b> | "
@@ -4716,6 +4783,8 @@ async def scanner_loop(app):
                                         f"TP1: {ake_cand['tp1']} .. TP5: {ake_cand['tp5']}"
                                     ),
                                 )
+                                new_ake_refs = (new_ake_refs or []) + (ake_photo_refs or [])
+                            await db.state_set("ake_open_msg_ids", new_ake_refs or [])
 
                             ex_mode = await db.state_get("exness_mode", EXNESS_AUTOTRADE_DEFAULT_MODE)
                             if ex_mode in ("ake", "both"):
@@ -4799,20 +4868,30 @@ async def scanner_loop(app):
                         await db.state_set("current_trade", cand)
                         last_signal_bar_ts = cur_bar_ts
                         _metrics["signals"] += 1
+
+                        # Eski 'bitim ochildi' xabarlarini (matn + grafik) o'chirish — faqat faol bitim qolsin
+                        old_day_refs = await db.state_get("day_open_msg_ids", [])
+                        if old_day_refs:
+                            _spawn(delete_tracked_messages(session, old_day_refs))
+
                         acc = await get_account()
                         msg = format_signal_message(cand, status, acc)
-                        await send_telegram(session, msg, with_keyboard=True)
+                        new_day_refs = await send_telegram(session, msg, with_keyboard=True)
 
                         # Grafik yuborish
                         png = await render_chart_async(cl15, status["zones15"], status["struct15"], trade=cand)
                         if png:
-                            await send_telegram_photo(
+                            photo_refs = await send_telegram_photo(
                                 session, png,
                                 caption=f"{side_icon(cand['signal'])} <b>{side_txt(cand['signal'])} @ {cand['entry']}</b> | SL: {cand['sl']} | TP: {cand['tp1']}",
                             )
+                            new_day_refs = (new_day_refs or []) + (photo_refs or [])
+                        await db.state_set("day_open_msg_ids", new_day_refs or [])
 
                         # Exness & Binance avto-savdo
-                        _spawn(execute_exness_autotrades(session, dict(cand)))
+                        ex_mode = await db.state_get("exness_mode", EXNESS_AUTOTRADE_DEFAULT_MODE)
+                        if ex_mode in ("day", "both"):
+                            _spawn(execute_exness_autotrades(session, dict(cand)))
                         _spawn(execute_binance_autotrades(session, dict(cand)))
 
                         # Gemini AI sharhi
@@ -5543,6 +5622,7 @@ async def handle_api_state(request):
     if not cid:
         return web.json_response({"ok": False, "error": "Unauthorized"}, status=401)
     trade = await db.state_get("current_trade")
+    ake_trade = await db.state_get("current_trade_ake")
     ex_accs = await db.get_exness_accounts(cid)
     wr = await win_rate_text()
     p = live_price() or (_LAST_CANDLES_15M[-1][C] if _LAST_CANDLES_15M else None)
@@ -5553,6 +5633,7 @@ async def handle_api_state(request):
         "b15": _LAST_STRUCT_15M.get("bias"),
         "eq15": _LAST_STRUCT_15M.get("eq"),
         "trade": trade,
+        "ake_trade": ake_trade,
         "wr": wr,
         "exness": [
             {
@@ -5604,10 +5685,13 @@ async def handle_mt5_bridge_poll(request):
     if DASHBOARD_TOKEN and token != DASHBOARD_TOKEN:
         return web.json_response({"ok": False, "error": "Invalid token"}, status=403)
     trade = await db.state_get("current_trade")
+    ake_trade = await db.state_get("current_trade_ake")
     return web.json_response({
         "ok": True,
         "active_trade": trade,
+        "active_ake_trade": ake_trade,
         "recent_signals": _BRIDGE_SIGNALS_QUEUE[-10:],
+        "recent_ake_signals": _AKE_BRIDGE_SIGNALS_QUEUE[-10:],
         "server_time": int(time.time()),
     })
 
@@ -5674,6 +5758,7 @@ async def on_startup(app):
         _CURRENT_GEMINI_MODEL = str(saved_mod)
 
     app["session"] = aiohttp.ClientSession()
+    _spawn(set_telegram_bot_commands(app["session"]))
     app["ws_task"] = asyncio.create_task(bybit_ws_loop(app))
     app["autosync_task"] = asyncio.create_task(auto_sync_loop(app))
     app["scanner_task"] = asyncio.create_task(scanner_loop(app))
