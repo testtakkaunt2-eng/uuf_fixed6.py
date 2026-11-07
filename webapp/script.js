@@ -14,19 +14,35 @@ async function loadState() {
   try {
     const d = await api("/api/state");
     if (!d.ok) return;
-    document.getElementById("price").innerText = d.price ? d.price.toFixed(2) : "---";
-    document.getElementById("bias").innerText = "15m: " + (d.b15 || "NEUTRAL").toUpperCase();
-    document.getElementById("offset").innerText = "Offset: " + (d.offset >= 0 ? "+" : "") + d.offset;
+    document.getElementById("price").innerText = (d.price !== null && d.price !== undefined) ? Number(d.price).toFixed(2) : "---";
+    document.getElementById("brk_lbl").innerText = "XAUUSD (" + (d.broker || "EXNESS").toUpperCase() + ") | $" + Number(d.balance || 20).toFixed(2);
+    document.getElementById("bias").innerText = "15m: " + (d.b15 || "NEUTRAL").toUpperCase() + " | 1m: " + (d.trend_1m || "NEUTRAL").toUpperCase();
+    document.getElementById("offset").innerText = "Offset: " + (d.offset >= 0 ? "+" : "") + Number(d.offset || 0).toFixed(2);
+
     const tb = document.getElementById("trade_box");
     if (d.trade) {
       const color = d.trade.signal === 'LONG' ? 'var(--green)' : 'var(--red)';
-      const icon = d.trade.signal === 'LONG' ? 'fa-arrow-trend-up' : 'fa-arrow-trend-down';
-      tb.innerHTML = `<div class="row"><span><i class="fa-solid ${icon}"></i> Yo'nalish:</span><b style="color:${color}; font-size: 15px;">${d.trade.signal} @ ${d.trade.entry}</b></div>
-                      <div class="row"><span><i class="fa-solid fa-shield"></i> SL / TP1 / TP2:</span><b style="letter-spacing:0.5px">${d.trade.sl} / ${d.trade.tp1} / ${d.trade.tp2}</b></div>`;
+      const label = d.trade.signal === 'LONG' ? 'BUY' : 'SELL';
+      tb.innerHTML = `<div class="row"><span>Yo'nalish:</span><b style="color:${color}; font-size: 15px;">${label} @ ${d.trade.entry}</b></div>
+                      <div class="row"><span>SL / TP:</span><b>${d.trade.sl} / ${d.trade.tp1}</b></div>`;
     } else {
-      tb.innerHTML = `<div class="row"><span><i class="fa-solid fa-eye"></i> Holat:</span><span style="color:var(--muted)">Sniper zona kutilmoqda...</span></div>
-                      <div class="row"><span><i class="fa-solid fa-scale-balanced"></i> Win Rate:</span><b style="color:var(--gold)">${d.wr}</b></div>`;
+      tb.innerHTML = `<div class="row"><span>Holat:</span><span style="color:var(--muted)">15m Sniper zona kutilmoqda...</span></div>
+                      <div class="row"><span>Win Rate:</span><b style="color:var(--gold)">${d.wr}</b></div>`;
     }
+
+    const ab = document.getElementById("ake_box");
+    const ast = (d.ake_stats && d.ake_stats.day) ? d.ake_stats.day : {total:0, wins:0, wr:0, total_r:0};
+    if (d.ake_trade) {
+      const aColor = d.ake_trade.signal === 'LONG' ? 'var(--green)' : 'var(--red)';
+      const aLabel = d.ake_trade.signal === 'LONG' ? 'BUY' : 'SELL';
+      ab.innerHTML = `<div class="row"><span>Ochiq 1m Skalp:</span><b style="color:${aColor}">${aLabel} @ ${d.ake_trade.entry} (TP hit: ${d.ake_trade.max_r_hit || 0}R)</b></div>
+                      <div class="row"><span>SL / TP1..TP5:</span><b>${d.ake_trade.sl} / ${d.ake_trade.tp1} → ${d.ake_trade.tp5}</b></div>
+                      <div class="row"><span>Bugungi R:</span><b style="color:var(--gold)">${ast.total} bitim | TP: ${ast.wins} (${ast.wr}%) | ${ast.total_r >= 0 ? '+' : ''}${ast.total_r}R</b></div>`;
+    } else {
+      ab.innerHTML = `<div class="row"><span>Holat:</span><span style="color:var(--muted)">1m Ake impuls kutilmoqda...</span></div>
+                      <div class="row"><span>Bugungi R:</span><b style="color:var(--gold)">${ast.total} bitim | TP: ${ast.wins} (${ast.wr}%) | ${ast.total_r >= 0 ? '+' : ''}${ast.total_r}R</b></div>`;
+    }
+
     const el = document.getElementById("exness_list");
     el.innerHTML = (d.exness || []).map(a =>
       `<div class="row">
@@ -36,14 +52,14 @@ async function loadState() {
          </div>
          <a href="#" class="delete-btn" onclick="delEx(${a.slot})"><i class="fa-solid fa-trash"></i></a>
        </div>`
-    ).join("") || "<div style='color:var(--muted);text-align:center;padding:10px 0;'><i class='fa-solid fa-box-open mb-3'></i><br>Hali hisob ulanmagan</div>";
+    ).join("") || "<div style='color:var(--muted);text-align:center;padding:10px 0;'>Hali hisob ulanmagan</div>";
   } catch (e) {}
 }
 
 async function act(cmd) {
   if (tg && tg.HapticFeedback) tg.HapticFeedback.impactOccurred('medium');
   await api("/api/action", { action: cmd });
-  if (tg) tg.showAlert("Buyruq yuborildi: " + cmd);
+  if (tg) tg.showAlert("Buyruq bajarildi: " + cmd);
   loadState();
 }
 
