@@ -152,9 +152,9 @@ AKE_ENABLED_DEFAULT = True
 DAY_ENABLED_DEFAULT = True
 AKE_TF = "1m"
 AKE_LIMIT = 240
-AKE_MIN_SL_POINTS = 1.60           # 1m scalp minimal SL (1R) masofasi ($)
-AKE_MAX_SL_POINTS = 3.20           # 1m scalp optimal maksimal SL (1R) masofasi ($)
-AKE_SKIP_IF_SL_OVER = 3.85         # Agar 1m sham juda katta bo'lib SL > 3.85$ bo'lsa, xavfli sham o'tkazib yuboriladi
+AKE_MIN_SL_POINTS = 1.40           # $20 hisob uchun 1m scalp minimal SL (1R) masofasi ($)
+AKE_MAX_SL_POINTS = 2.20           # $20 hisob uchun 1m scalp maksimal SL (1R = max 2.20$, 3.20$ emas!)
+AKE_SKIP_IF_SL_OVER = 3.20         # Agar 1m sham juda katta bo'lib SL > 3.20$ bo'lsa, xavfli sham o'tkazib yuboriladi
 AKE_ATR_SL_MULT = 1.20             # 1m ATR ko'paytmasi (1R hisoblash uchun)
 AKE_TP_R_LEVELS = (1.0, 2.0, 3.0, 4.0, 5.0)  # TP1=1R, TP2=2R, TP3=3R, TP4=4R, TP5=5R
 AKE_COOLDOWN_SEC = 240             # 1m Ake signallar orasida minimal kutish (4 daqiqa — yangi LH/HL to'lqinni o'tkazib yubormaslik uchun)
@@ -4825,9 +4825,32 @@ def analyze_ake_1m_scalp(cl1, cl5, price, last_closed_ake=None):
     sig_side = None
     sig_reason = []
     matched_zone = None
-    # Kvant mikrostruktura: agar sotuvchilar bosimi juda kuchli (ofi <= 0.45) bo'lsa yoki qora sakrash (jump) bo'lsa kirish to'xtatiladi
-    long_micro_ok = tail_1m["safe"] and ofi_1m["ofi_ratio"] >= 0.45
-    short_micro_ok = tail_1m["safe"] and ofi_1m["ofi_ratio"] <= 2.20
+    # QAT'IY TREND VA "QULAYOTGAN PICHOQNI USHLAMASLIK" (ANTI-FALLING-KNIFE) HIMOYASI:
+    # 15m EMA8 va EMA21 yo'nalishini tekshiramiz: bozor qulayotganda (4128 -> 4106) qarshi BUY ochish QAT'IYAN TAQIQLANADI!
+    htf_ema_bull, htf_ema_bear = True, True
+    if cl5 and len(cl5) >= 21:
+        c15_closes = [c[C] for c in cl5[-25:]]
+        ema15_8 = sum(c15_closes[-8:]) / 8.0
+        ema15_21 = sum(c15_closes[-21:]) / 21.0
+        htf_ema_bull = (ema15_8 >= ema15_21 - 0.35) and (cl5[-1][C] >= cl5[-3][C] - 1.50)
+        htf_ema_bear = (ema15_8 <= ema15_21 + 0.35) and (cl5[-1][C] <= cl5[-3][C] + 1.50)
+
+    # 1m da ham qattiq tushish trendida (ema9 < ema21 < ema50 va st_dir == -1) BUY ochilmaydi!
+    strict_bull_trend_ok = htf_ema_bull and (b_htf != "bearish") and (st_dir == 1 or ema9 >= ema21 - 0.15) and (ema21 >= ema50 - 0.60)
+    strict_bear_trend_ok = htf_ema_bear and (b_htf != "bullish") and (st_dir == -1 or ema9 <= ema21 + 0.15) and (ema21 <= ema50 + 0.60)
+
+    # Agar oxirgi Ake bitim shu yo'nalishda SL (-1R) bo'lgan bo'lsa va narx/struktura yaxshilanmagan bo'lsa, ketma-ket SL yemaslik!
+    if last_closed_ake and int(last_closed_ake.get("max_r_hit") or 0) == 0:
+        last_sl_side = last_closed_ake.get("signal")
+        last_sl_entry = float(last_closed_ake.get("entry") or 0.0)
+        if last_sl_side == "LONG" and (price <= last_sl_entry or ema9 <= ema21):
+            strict_bull_trend_ok = False
+        elif last_sl_side == "SHORT" and (price >= last_sl_entry or ema9 >= ema21):
+            strict_bear_trend_ok = False
+
+    # Kvant mikrostruktura: sotuvchilar/xaridorlar bosimi + Taleb Tail-Risk
+    long_micro_ok = tail_1m["safe"] and ofi_1m["ofi_ratio"] >= 0.75 and strict_bull_trend_ok
+    short_micro_ok = tail_1m["safe"] and ofi_1m["ofi_ratio"] <= 1.35 and strict_bear_trend_ok
 
     if (bull_sweep_reversal or bull_trend_breakout or bull_zone_bounce or bull_hl_pullback or bull_manip_combo) and (not in_mid_chop or has_bull_anchor) and long_micro_ok:
         sig_side = "LONG"
@@ -4924,15 +4947,11 @@ def analyze_ake_1m_scalp(cl1, cl5, price, last_closed_ake=None):
                             htf_match_str = f"15m {hz['kind']} ({hz['bottom']:.2f} — {hz['top']:.2f})"
                             break
 
-            # Sifatiga qarab dinamik lotni hisoblash (A+ sifatda lot 0.02 ga oshiriladi):
+            # $20 Hisob Himoyasi: Kichik balansda har doim 0.01 lot ishlatiladi (0.02 lot $20 balansni 2 barobar tez yeb qo'ymasligi uchun)
             has_htf = bool(htf_match_str)
             is_high_quality = has_htf or len(sig_reason) >= 2 or (bull_hl_pullback or bear_lh_pullback)
-            if is_high_quality:
-                trade_lot = 0.02
-                quality_grade = "A+ (Yuqori Sifat · 0.02 Lot)"
-            else:
-                trade_lot = 0.01
-                quality_grade = "A (Standart · 0.01 Lot)"
+            trade_lot = 0.01
+            quality_grade = "A+ (Trend Sniper · 0.01 Lot)" if is_high_quality else "A (Standart · 0.01 Lot)"
 
             calc_risk_usd = round((trade_lot / XM_MIN_LOT) * risk_1r * XM_OZ_PER_MIN_LOT, 2)
 
@@ -5136,10 +5155,10 @@ async def close_ake_trade(session, trade, price, reason_label="SL"):
             icon = "🎯"
             status_title = "TP5 (+5.0R) to'liq olindi va yopildi!"
         elif reason_label in ("TRAIL_SL", "SL"):
-            rule_r = 0.35 if max_hit == 1 else float(max_hit - 1)
+            rule_r = 0.85 if max_hit == 1 else round(float(max_hit) - 0.25, 2)
             res_code = f"TP{max_hit} (+{peak_r:.1f}R)"
             icon = "🛡"
-            status_title = f"Ko'chirilgan SL ga tegdi va foydada yopildi! (Rekord TP: +{peak_r:.1f}R)"
+            status_title = f"TP{max_hit} (+{peak_r:.1f}R) olindi va +{rule_r:.2f}R naqd foydada yopildi!"
         else:
             rule_r = round(raw_r, 2)
             res_code = f"TP{max_hit} (+{peak_r:.1f}R)"
@@ -5233,19 +5252,19 @@ async def monitor_ake_trade(session, price, candle_high=None, candle_low=None):
                 trade["max_r_hit"] = k
                 changed = True
                 if k == 1:
-                    # TP1 (+1.0R) olinganda SL 0.0R ga emas, +0.35R sof foydaga qulflanadi!
-                    lock_sl = round(entry + risk_pts * 0.35, 2) if is_long else round(entry - risk_pts * 0.35, 2)
+                    # TP1 (+1.0R) olinganda SL +0.85R sof foydaga qulflanadi (Qoida bo'yicha R plyusda bo'lishi uchun!)
+                    lock_sl = round(entry + risk_pts * 0.85, 2) if is_long else round(entry - risk_pts * 0.85, 2)
                     trade["sl"] = lock_sl
                     notes.append(
                         f"⚡ <b>[Ake signals 7 · 1m] {side_txt(trade['signal'])} TP1 (+1.0R) olindi ✓</b> "
-                        f"(<code>{tp_lvl:.2f}</code>) | SL ➡️ <code>{lock_sl:.2f}</code> (+0.35R foyda qulflandi)"
+                        f"(<code>{tp_lvl:.2f}</code>) | SL ➡️ <code>{lock_sl:.2f}</code> (+0.85R sof foyda qulflandi!)"
                     )
                 elif k < 5:
-                    prev_tp = float(trade[f"tp{k-1}"])
-                    trade["sl"] = prev_tp
+                    lock_sl_k = round(entry + risk_pts * (k - 0.25), 2) if is_long else round(entry - risk_pts * (k - 0.25), 2)
+                    trade["sl"] = lock_sl_k
                     notes.append(
                         f"🔥 <b>[Ake signals 7 · 1m] {side_txt(trade['signal'])} TP{k} (+{k}.0R) olindi ✓</b> "
-                        f"(<code>{tp_lvl:.2f}</code>) | SL ➡️ TP{k-1} (<code>{prev_tp:.2f}</code> +{k-1}.0R)"
+                        f"(<code>{tp_lvl:.2f}</code>) | SL ➡️ <code>{lock_sl_k:.2f}</code> (+{k-0.25:.2f}R foyda qulflandi!)"
                     )
                 elif k == 5:
                     prev_tp = float(trade["tp4"])
@@ -5745,7 +5764,15 @@ async def handle_command(session, chat_id, text, message_id=None):
         async with _ake_monitor_lock:
             await db.clear_ake_trades()
             await db.state_set("current_trade_ake", None)
-        await send_telegram(session, "🧹 <b>Ake signals 7 (1m) tarixi va R-jadvali 0 ga tozalandi!</b>", chat_id=cid)
+        acc_now = await get_account()
+        if float(acc_now.get("balance", 20.0)) < DEFAULT_BALANCE_USD:
+            await update_account(balance=DEFAULT_BALANCE_USD)
+        await send_telegram(
+            session,
+            f"🧹 <b>Ake signals 7 (1m) tarixi va R-jadvali 0 ga tozalandi!</b>\n"
+            f"💰 Balans: <b>${(await get_account())['balance']:.2f}</b>",
+            chat_id=cid,
+        )
 
     elif cmd == "/day_reset":
         async with _monitor_lock:
@@ -6647,6 +6674,9 @@ async def on_startup(app):
     saved_brk = await db.state_get("active_broker")
     if saved_brk in ("exness", "xm"):
         _ACTIVE_BROKER = str(saved_brk)
+    acc_init = await get_account()
+    if float(acc_init.get("balance", 20.0)) <= 1.05:
+        await update_account(balance=DEFAULT_BALANCE_USD)
     saved_mod = await db.state_get("gemini_model")
     if saved_mod and _GEMINI_NAME_RE.fullmatch(str(saved_mod)):
         _CURRENT_GEMINI_MODEL = str(saved_mod)
