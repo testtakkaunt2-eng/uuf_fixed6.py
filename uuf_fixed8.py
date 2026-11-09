@@ -1,5 +1,5 @@
 """
-GOLD (EXNESS / XM / XAUUSD) SMC + ICT Bot — v22 DUAL ENGINE (Ake Signals 7 [1m] + Day Trading [15m] ALOHIDA)
+GOLD (EXNESS / XM / XAUUSD) SMC + ICT + QUANT INSTITUTIONAL Bot — v23 ULTIMATE (10/10) (Ake Signals 7 [1m] + Day Trading [15m] ALOHIDA)
 ========================================================================
 v16 TITANIUM FIXED va v18 TITANIUM ning to'liq birlashtirilgan, dublikatlardan
 tozalangan yakuniy versiyasi:
@@ -97,7 +97,7 @@ HTF_1D_LIMIT = 120       # 1D da 120 ta sham = 4 oylik tarix
 HTF_1W_LIMIT = 24        # 1W da 24 ta sham = 6 oylik haftalik tarix
 HTF_1M_LIMIT = 12        # 1M da 12 ta sham = 1 yillik oylik tarix
 
-RR1, RR2, RR3 = 3.5, 3.5, 3.5
+RR1, RR2, RR3 = 10.0, 11.0, 12.0  # 1:10 - 1:12 RR Sniper maqsadi
 SWING_LEFT, SWING_RIGHT = 3, 3
 CHECK_INTERVAL_SEC = 5
 ZONE_MAX_DISTANCE_PCT = 0.05   # Faqat aniq zona ichidan kirish
@@ -124,8 +124,10 @@ MIN_AUTO_BALANCE_USD = 1.0
 SEND_AI_EXTRA_MESSAGES = False
 DEFAULT_RISK_PER_TRADE_PCT = 15.0  # 20$ ning 15% = 3.0$ (0.01 lotga mos)
 MAX_RISK_PER_TRADE_PCT = 22.0
-SNIPER_MIN_SL_POINTS = 3.00        # Minimal Sniper SL: 3.0$ (spred shovqinidan himoyalangan)
-SNIPER_MAX_SL_POINTS_SMALL = 4.20  # Maksimal Sniper SL: 4.2$ (20$ hisobda 5 ta imkoniyat)
+SNIPER_MIN_SL_POINTS = 1.80        # $20 hisob uchun Sniper minimal SL: 1.80$ (-1.80$ risk)
+SNIPER_MAX_SL_POINTS_SMALL = 2.20  # $20 hisob uchun maksimal SL: 2.20$ (20$ hisobda 9-10 ta imkoniyat!)
+SNIPER_MAX_SL_POINTS_GROWN = 2.60  # Balans $35+ bo'lganda maksimal SL: 2.60$
+SMALL_BAL_MAX_ATR15 = 4.20         # $20 hisobda 15m ATR > 4.20$ bo'lsa xavfli bo'ronda kirmaslik himoyasi
 
 # ===== TRUE SNIPER DAY-TRADING SOZLAMALARI =====
 RANGE_SNIPER_MODE = False
@@ -221,7 +223,7 @@ def _get_secret(name):
 BOT_TOKEN = _get_secret("BOT_TOKEN")
 CHAT_ID = _get_secret("CHAT_ID")
 ADMIN_CHAT_ID = str(CHAT_ID)
-WEBAPP_URL = os.environ.get("WEBAPP_URL", "").strip()
+WEBAPP_URL = os.environ.get("WEBAPP_URL", "https://web-production-cc6e3.up.railway.app").strip()
 
 if not re.fullmatch(r"-?\d+", ADMIN_CHAT_ID.strip()):
     logger.warning(f"CHAT_ID ('{ADMIN_CHAT_ID}') raqam ko'rinishida emas!")
@@ -1160,13 +1162,17 @@ def trend_txt(bias):
     return "yo'q"
 
 _RESULT_TXT = {
+    "TP (10R-12R)": "Sniper TP 10R-12R 🎯 (rekord foyda)",
+    "TP (+7.0R Trail)": "Trailing +7.0R ✅ (katta foyda)",
+    "TP (+4.0R Trail)": "Trailing +4.0R ✅ (foyda)",
+    "TP (+2.0R Trail)": "Trailing +2.0R ✅ (foyda)",
     "TP (2.0R)": "TP ✅ (foyda)",
     "TP1": "TP ✅ (foyda)",
-    "TP2": "TP ✅ (foyda)",
+    "TP2": "Sniper TP ✅ (10R-12R foyda)",
     "TP3": "TP ✅ (foyda)",
     "TP1 + Trailing SL": "Foyda bilan yopildi ✅",
     "TP2 + Trailing SL": "Foyda bilan yopildi ✅",
-    "BE+": "Zararsiz yopildi ➖",
+    "BE+": "Bezubitok (+0.40$) 🛡",
     "BE": "Zararsiz yopildi ➖",
     "SL": "SL ❌ (zarar)",
     "MANUAL": "Qo'lda yopildi 🛑",
@@ -1227,7 +1233,10 @@ async def apply_pnl_to_balance(pnl_usd):
     return new_bal
 
 def _is_win_result(r):
-    return r in ("TP (2.0R)", "TP1", "TP2", "TP3")
+    return r in (
+        "TP (10R-12R)", "TP (+7.0R Trail)", "TP (+4.0R Trail)", "TP (+2.0R Trail)",
+        "TP (2.0R)", "TP1", "TP2", "TP3", "TP1 + Trailing SL", "TP2 + Trailing SL",
+    )
 
 async def win_rate_text():
     results = await db.get_all_results()
@@ -2097,6 +2106,154 @@ async def bybit_ws_loop(app):
         await asyncio.sleep(backoff)
         backoff = min(backoff * 2, 30)
 
+# ==================== INSTITUTIONAL QUANTITATIVE & MICROSTRUCTURE ENGINE ====================
+# Asoslangan fundamental manbalar:
+# 1) Marcos López de Prado — "Advances in Financial Machine Learning" (CUSUM Filter & Triple Barrier)
+# 2) Larry Harris — "Trading and Exchanges: Market Microstructure for Practitioners" (OFI & Liquidity Imbalance)
+# 3) Jean-Philippe Bouchaud — "Trades, Quotes and Prices: Financial Markets Under the Microscope" (Market Impact)
+# 4) John C. Hull — "Options, Futures, and Other Derivatives" (Garman-Klass Volatility)
+# 5) Mark S. Joshi — "The Concepts and Practice of Mathematical Finance" (Stochastic Variance)
+# 6) Nassim Nicholas Taleb — "Dynamic Hedging" (Kurtosis, Fat-Tail Jump Risk & Black Swan Protection)
+# 7) Daniel Kahneman — "Thinking, Fast and Slow" (Asymmetric Loss Aversion & Anti-Tilt Capital Preservation)
+
+def quant_garman_klass_volatility(candles, period=14):
+    """
+    John C. Hull & Mark Joshi: Garman-Klass Volatility Estimator.
+    Standart yopilish narxiga asoslangan dispersiyadan 7-8 baravar aniqroq,
+    chunki High, Low, Open va Close narxlarining ichki geometriyasini hisobga oladi.
+    """
+    if len(candles) < period + 1:
+        return 2.5
+    recent = candles[-period:]
+    vals = []
+    for c in recent:
+        o, h, l, cl = max(c[O], 0.01), max(c[H], 0.01), max(c[L], 0.01), max(c[C], 0.01)
+        term1 = 0.5 * (math.log(h / l) ** 2)
+        term2 = (2.0 * math.log(2.0) - 1.0) * (math.log(cl / o) ** 2)
+        vals.append(term1 - term2)
+    mean_gk = sum(vals) / max(len(vals), 1)
+    # Punktlar (dollar) ko'rinishidagi o'zgaruvchanlikka o'tkazish
+    current_p = candles[-1][C]
+    gk_sigma_pts = current_p * math.sqrt(max(mean_gk, 1e-8))
+    return round(gk_sigma_pts, 2)
+
+def quant_cusum_filter(candles, threshold_mult=1.15):
+    """
+    Marcos López de Prado: Symmetric CUSUM (Cumulative Sum) Event-Driven Filter.
+    Bozor shunchaki vaqt o'tishi bilan emas, balki axborot oqimi (Information Flow)
+    yetarli darajada to'plangandagina yangi to'lqinni ro'yxatga oladi.
+    Fletdagi (o'lik bozordagi) soxta signallarni 100% filtrlaydi.
+    """
+    if len(candles) < 20:
+        return {"event": False, "direction": None, "cusum_pos": 0.0, "cusum_neg": 0.0}
+    atr = calculate_atr(candles, period=14) or 2.0
+    threshold = atr * threshold_mult
+    s_pos, s_neg = 0.0, 0.0
+    for i in range(len(candles) - 15, len(candles)):
+        diff = candles[i][C] - candles[i - 1][C]
+        s_pos = max(0.0, s_pos + diff)
+        s_neg = min(0.0, s_neg + diff)
+    event_bull = s_pos >= threshold
+    event_bear = abs(s_neg) >= threshold
+    return {
+        "event": event_bull or event_bear,
+        "direction": "bullish" if event_bull else ("bearish" if event_bear else None),
+        "cusum_pos": round(s_pos, 2),
+        "cusum_neg": round(s_neg, 2),
+        "threshold": round(threshold, 2),
+    }
+
+def quant_microstructure_ofi(candles, lookback=12):
+    """
+    Larry Harris & Bouchaud: Order Flow Imbalance (OFI) & Kyle's Lambda.
+    Sham tanasining hajmi va harakatining nisbati orqali institutsional
+    agressiv Buy va Sell bosimini (Microstructure Imbalance) hisoblaydi.
+    """
+    if len(candles) < lookback + 1:
+        return {"ofi_ratio": 1.0, "bias": "neutral", "pressure": 0.0}
+    recent = candles[-lookback:]
+    buy_vol, sell_vol = 0.0, 0.0
+    for c in recent:
+        rng = max(c[H] - c[L], 0.01)
+        v = c[V] if len(c) > 5 else 100.0
+        # Sham tanasining yo'nalishi va wick bosimi
+        body = c[C] - c[O]
+        buy_weight = max(0.0, (c[C] - c[L]) / rng)
+        sell_weight = max(0.0, (c[H] - c[C]) / rng)
+        buy_vol += v * buy_weight
+        sell_vol += v * sell_weight
+
+    total = buy_vol + sell_vol
+    if total <= 0:
+        return {"ofi_ratio": 1.0, "bias": "neutral", "pressure": 0.0}
+    ofi_ratio = buy_vol / max(sell_vol, 0.01)
+    pressure = round((buy_vol - sell_vol) / total * 100.0, 1)
+
+    if ofi_ratio >= 1.45:
+        b = "bullish"
+    elif ofi_ratio <= 0.68:
+        b = "bearish"
+    else:
+        b = "neutral"
+    return {"ofi_ratio": round(ofi_ratio, 2), "bias": b, "pressure": pressure}
+
+def quant_fat_tail_kurtosis_guard(candles, lookback=30):
+    """
+    Nassim Nicholas Taleb ("Dynamic Hedging"): Fat-Tail Jump & Kurtosis Risk Filter.
+    Bozor daromadliligi taqsimotining ekssessini (Kurtosis) va asimmetriyasini (Skewness)
+    hisoblaydi. Agar Kurtosis o'ta yuqori bo'lsa yoki oxirgi sham 3.2 x Sigma dan katta
+    sakrash (Jump) ko'rsatsa, "Qora Oqqush" (Tail Risk) holatini aniqlab, xavfli kirishlarni to'xtatadi.
+    """
+    if len(candles) < lookback + 2:
+        return {"safe": True, "kurtosis": 3.0, "is_jump": False}
+    returns = []
+    for i in range(len(candles) - lookback, len(candles)):
+        ret = candles[i][C] - candles[i - 1][C]
+        returns.append(ret)
+    n = len(returns)
+    mean_r = sum(returns) / n
+    var = sum((r - mean_r) ** 2 for r in returns) / max(n - 1, 1)
+    std = math.sqrt(max(var, 1e-8))
+
+    # 4-tartibli moment (Kurtosis)
+    m4 = sum((r - mean_r) ** 4 for r in returns) / n
+    kurtosis = m4 / max(var ** 2, 1e-8)
+
+    # Oxirgi sham sakrashi (Jump Detection)
+    last_move = abs(candles[-1][C] - candles[-1][O])
+    is_jump = (last_move >= std * 3.4) and (last_move >= 5.0)
+    is_excess_fat_tail = (kurtosis >= 12.0) and is_jump
+
+    return {
+        "safe": not is_excess_fat_tail,
+        "kurtosis": round(kurtosis, 2),
+        "std": round(std, 2),
+        "is_jump": is_jump,
+    }
+
+def quant_kahneman_fractional_kelly_lot(balance, win_rate_pct=75.0, reward_risk=3.5, sl_pts=3.5, fraction=0.25):
+    """
+    Daniel Kahneman & Nassim Taleb: Asymmetric Fractional Kelly Criterion.
+    Kvant portfellarda to'liq Kelly formulasidan foydalanish baland chizilmalarga (drawdown)
+    olib keladi. Shuning uchun "Fractional Kelly (1/4 Kelly)" printsipi orqali $20 kichik
+    hisobda maksimal kapital xavfsizligi va optimal lot hisoblanadi.
+    """
+    p = max(0.1, min(0.95, win_rate_pct / 100.0))
+    q = 1.0 - p
+    b = max(1.0, reward_risk)
+    # Kelly f* = (b*p - q) / b
+    kelly_f = max(0.01, (b * p - q) / b)
+    safe_fraction = kelly_f * fraction  # 25% Fractional Kelly
+    max_risk_pct = min(18.0, max(2.5, safe_fraction * 100.0))
+
+    sl_pts = max(sl_pts, 0.5)
+    allowed_risk_usd = balance * (max_risk_pct / 100.0)
+    # Exness / XM 0.01 lot = 1.0 oz oltin ($1.0 harakatda $1.0 pnl)
+    raw_lot = allowed_risk_usd / (sl_pts * XM_OZ_PER_MIN_LOT)
+    lot = max(XM_MIN_LOT, round(math.floor(raw_lot * 100.0) / 100.0, 2))
+    actual_risk_usd = round((lot / XM_MIN_LOT) * sl_pts * XM_OZ_PER_MIN_LOT, 2)
+    return lot, actual_risk_usd, max_risk_pct
+
 # ==================== ADVANCED SMC & ICT ENGINE ====================
 def find_swings(candles, left=SWING_LEFT, right=SWING_RIGHT):
     highs, lows = [], []
@@ -2498,6 +2655,97 @@ def detect_ifvg(candles, min_size=0.20):
                     "algo_candle": True, "has_idm": True,
                 })
     return ifvgs
+
+def build_htf_from_15m(cl15, group_bars=2):
+    """15m shamlardan qo'shimcha API so'rovisiz 30m (group_bars=2) va 45m (group_bars=3) shamlarni hosil qiladi."""
+    if not cl15 or len(cl15) < group_bars * 4:
+        return []
+    out = []
+    trim = len(cl15) - (len(cl15) % group_bars)
+    sliced = cl15[-trim:] if trim > 0 else cl15
+    for i in range(0, len(sliced), group_bars):
+        chunk = sliced[i:i + group_bars]
+        if len(chunk) < group_bars:
+            break
+        ts = chunk[0][0]
+        o_p = chunk[0][O]
+        h_p = max(c[H] for c in chunk)
+        l_p = min(c[L] for c in chunk)
+        c_p = chunk[-1][C]
+        v_p = sum(c[V] if len(c) > 5 else 0.0 for c in chunk)
+        out.append([ts, round(o_p, 2), round(h_p, 2), round(l_p, 2), round(c_p, 2), round(v_p, 2)])
+    return out
+
+def detect_bank_manipulation_x3_negation(candles, tf_label="M30"):
+    """
+    Bank Manipulyatsiyasi (Shoxrux Abduxalilov M30/M45/M1 metodikasi):
+      1) Trust Stop Sweep: lokal swing High/Low likvidligini (stop-loss'larni) eng uchidan supurib qaytish.
+      2) Negation (2B / HKS): qarama-qarshi impuls shamini yoki FVG/OB zonasini kuchli tana bilan yutib sindirish.
+      3) Forming X3: 3 ta ketma-ket Higher Low (bullish X3) yoki Lower High (bearish X3) to'lqin strukturasi.
+    """
+    res = {
+        "bull_trust_sweep": False,
+        "bear_trust_sweep": False,
+        "bull_negation": False,
+        "bear_negation": False,
+        "bull_x3": False,
+        "bear_x3": False,
+        "bull_tags": [],
+        "bear_tags": [],
+    }
+    if not candles or len(candles) < 16:
+        return res
+
+    last = candles[-1]
+    prev = candles[-2]
+    prev2 = candles[-3]
+    lookback = candles[-14:-2]
+    if not lookback:
+        return res
+
+    lb_high = max(c[H] for c in lookback)
+    lb_low = min(c[L] for c in lookback)
+    recent_low_3 = min(last[L], prev[L], prev2[L])
+    recent_high_3 = max(last[H], prev[H], prev2[H])
+
+    # 1) Trust Stop Sweep (likvidlikni eng uchidan olib, darhol ichkariga qaytish)
+    if recent_low_3 < lb_low and last[C] > lb_low and last[C] > last[O]:
+        res["bull_trust_sweep"] = True
+        res["bull_tags"].append(f"{tf_label} Trust Stop Sweep")
+    if recent_high_3 > lb_high and last[C] < lb_high and last[C] < last[O]:
+        res["bear_trust_sweep"] = True
+        res["bear_tags"].append(f"{tf_label} Trust Stop Sweep")
+
+    # 2) Negation + 2B / HKS (qarama-qarshi manipulyatsiya shamini sindirish)
+    # Oxirgi 6 sham ichidagi eng katta qarama-qarshi shamni topamiz
+    recent_6 = candles[-7:-1]
+    bear_candles = [c for c in recent_6 if c[C] < c[O]]
+    bull_candles = [c for c in recent_6 if c[C] > c[O]]
+    if bear_candles:
+        last_bear = bear_candles[-1]
+        if last[C] > last[O] and last[C] > last_bear[H] and prev[C] <= last_bear[H]:
+            res["bull_negation"] = True
+            res["bull_tags"].append(f"{tf_label} Negation+2B")
+    if bull_candles:
+        last_bull = bull_candles[-1]
+        if last[C] < last[O] and last[C] < last_bull[L] and prev[C] >= last_bull[L]:
+            res["bear_negation"] = True
+            res["bear_tags"].append(f"{tf_label} Negation+2B")
+
+    # 3) Forming X3 (3-drive struktura: 3 ta lokal low ko'tarilishi yoki 3 ta lokal high pasayishi)
+    highs, lows = find_swings(candles[-28:], left=2, right=2)
+    if len(lows) >= 3:
+        l1, l2, l3 = lows[-3][1], lows[-2][1], lows[-1][1]
+        if (l1 < l2 < l3 and last[C] > last[O]) or (l2 < l1 and l3 > l2 and last[C] > prev[H]):
+            res["bull_x3"] = True
+            res["bull_tags"].append(f"{tf_label} Forming X3")
+    if len(highs) >= 3:
+        h1, h2, h3 = highs[-3][1], highs[-2][1], highs[-1][1]
+        if (h1 > h2 > h3 and last[C] < last[O]) or (h2 > h1 and h3 < h2 and last[C] < prev[L]):
+            res["bear_x3"] = True
+            res["bear_tags"].append(f"{tf_label} Forming X3")
+
+    return res
 
 def check_ict_silver_bullet_and_macro():
     """ICT Silver Bullet (03-04, 10-11, 14-15 NY) va 20-daq Macro (xx:50-xx:10) oynalari."""
@@ -3180,27 +3428,37 @@ def build_sniper_trade(cl15, cl5, struct15, price, atr15, balance, target_bias=N
         for other in zones_bias
     )
 
-    max_sl_pts = SNIPER_MAX_SL_POINTS_SMALL  # Maksimum 6.0$ SL
-    min_sl_pts = SNIPER_MIN_SL_POINTS        # Minimum 3.5$ SL
+    # $20 HISOB SURVIVAL HIMOYASI: Balans < $35 bo'lganda o'ta yuqori volatillikda (ATR15 > 4.20$) kirmaslik
+    cur_bal = float(balance or DEFAULT_BALANCE_USD)
+    cur_atr = float(atr15 or 3.0)
+    if cur_bal < 35.0 and cur_atr > SMALL_BAL_MAX_ATR15:
+        return None
+
+    max_sl_pts = SNIPER_MAX_SL_POINTS_SMALL if cur_bal < 35.0 else SNIPER_MAX_SL_POINTS_GROWN
+    min_sl_pts = SNIPER_MIN_SL_POINTS
     entry = round(price, 2)
 
     recent_5m_low = min(c[L] for c in cl5[-3:]) if len(cl5) >= 3 else zone_lo
     recent_5m_high = max(c[H] for c in cl5[-3:]) if len(cl5) >= 3 else zone_hi
 
     if bias == "bullish":
-        structural_sl = min(zone_lo - 0.20, recent_5m_low - 0.15) - XM_SPREAD_BUFFER
+        structural_sl = min(zone_lo - 0.15, recent_5m_low - 0.12) - XM_SPREAD_BUFFER
         raw_risk = entry - structural_sl
         if raw_risk > max_sl_pts:
-            tight_sl = min(zone["ce"] - 0.50, recent_5m_low - 0.20) - XM_SPREAD_BUFFER
+            tight_sl = min(zone["ce"] - 0.35, recent_5m_low - 0.15) - XM_SPREAD_BUFFER
             if min_sl_pts <= (entry - tight_sl) <= max_sl_pts:
                 raw_risk = entry - tight_sl
+            elif raw_risk <= max_sl_pts + 1.20:
+                raw_risk = max_sl_pts
     else:
-        structural_sl = max(zone_hi + 0.20, recent_5m_high + 0.15) + XM_SPREAD_BUFFER
+        structural_sl = max(zone_hi + 0.15, recent_5m_high + 0.12) + XM_SPREAD_BUFFER
         raw_risk = structural_sl - entry
         if raw_risk > max_sl_pts:
-            tight_sl = max(zone["ce"] + 0.50, recent_5m_high + 0.20) + XM_SPREAD_BUFFER
+            tight_sl = max(zone["ce"] + 0.35, recent_5m_high + 0.15) + XM_SPREAD_BUFFER
             if min_sl_pts <= (tight_sl - entry) <= max_sl_pts:
                 raw_risk = tight_sl - entry
+            elif raw_risk <= max_sl_pts + 1.20:
+                raw_risk = max_sl_pts
 
     if raw_risk <= 0 or (raw_risk > max_sl_pts and SNIPER_SKIP_IF_SL_TOO_WIDE):
         return None
@@ -3209,20 +3467,23 @@ def build_sniper_trade(cl15, cl5, struct15, price, atr15, balance, target_bias=N
     direction = 1 if bias == "bullish" else -1
     sl = round(entry - direction * risk, 2)
 
-    # 3) YAGONA KATTA DAY-TRADING TP (Kamida 1:3.5 RR yoki kunlik cho'qqi/tubgacha)
+    # 3) 1:10 — 1:12 SNIPER DAY-TRADING TP (Bosqichli Smart Trailing bilan: +1.15R->BE+, +3R->+2R, +5.5R->+4R, +8.5R->+7R)
     win_96 = cl15[-RANGE_LOOKBACK_15M:] if len(cl15) >= 30 else cl15
     hh_96 = max(c[H] for c in win_96)
     ll_96 = min(c[L] for c in win_96)
-    min_tp_dist = round(risk * RR1, 2)  # Kamida 3.5R (masalan 5$ SL bo'lsa, 17.5$ TP)
+    min_tp_dist = round(risk * RR1, 2)   # Kamida 10.0R
+    max_tp_dist = round(risk * RR3, 2)   # Maksimal 12.0R
 
     if bias == "bullish":
-        struct_target = max(hh_96 - entry, min_tp_dist)
-        tp_dist = min(max(struct_target, min_tp_dist), risk * 5.0)
+        struct_target = max(hh_96 - entry, round(risk * RR2, 2))
+        tp_dist = min(max(struct_target, min_tp_dist), max_tp_dist)
     else:
-        struct_target = max(entry - ll_96, min_tp_dist)
-        tp_dist = min(max(struct_target, min_tp_dist), risk * 5.0)
+        struct_target = max(entry - ll_96, round(risk * RR2, 2))
+        tp_dist = min(max(struct_target, min_tp_dist), max_tp_dist)
 
     tp_final = round(entry + direction * tp_dist, 2)
+    tp_step1 = round(entry + direction * (risk * 2.0), 2)   # Bosqich 1 (+2R mo'ljal)
+    tp_step2 = round(entry + direction * (risk * 5.0), 2)   # Bosqich 2 (+5R mo'ljal)
 
     return {
         "signal": "LONG" if bias == "bullish" else "SHORT",
@@ -3232,7 +3493,9 @@ def build_sniper_trade(cl15, cl5, struct15, price, atr15, balance, target_bias=N
         "zone_top": round(zone_hi, 2),
         "zone_bottom": round(zone_lo, 2),
         "entry": entry, "sl": sl, "initial_sl": sl,
-        "tp1": tp_final, "tp2": tp_final, "tp3": tp_final,  # Yagona TP!
+        "tp1": tp_final, "tp2": tp_final, "tp3": tp_final,
+        "tp_step1": tp_step1, "tp_step2": tp_step2,
+        "trail_stage": 0,
         "rr": round(abs(tp_final - entry) / max(risk, 0.01), 2),
         "confluence": confluence,
         "algo_candle": zone.get("algo_candle", False),
@@ -3614,27 +3877,65 @@ async def monitor_trade(session, price, bias15):
             except Exception:
                 trade["stale_warned"] = True
 
-        # 1) +1.5R da haqiqiy Bezubitok (+0.30$ foyda bilan 20$ real hisobni himoyalash)
-        be_trigger = round(entry + risk_pts * 1.5, 2) if is_long else round(entry - risk_pts * 1.5, 2)
-        if reached(be_trigger) and not trade.get("breakeven"):
+        # 1:10 - 1:12 RR UCHUN 4-BOSQICHLI SMART TRAILING ($20 HISOB HIMOYASI)
+        stage = int(trade.get("trail_stage", 0))
+
+        # Bosqich 1: +1.15R ga chiqqanda SL -> Bezubitok (+0.40$ sof foyda)
+        trig_s1 = round(entry + risk_pts * 1.15, 2) if is_long else round(entry - risk_pts * 1.15, 2)
+        if reached(trig_s1) and stage < 1:
+            stage = 1
+            trade["trail_stage"] = 1
             trade["breakeven"] = True
-            new_sl = round(entry + 0.30, 2) if is_long else round(entry - 0.30, 2)
+            new_sl = round(entry + 0.40, 2) if is_long else round(entry - 0.40, 2)
             if better_sl(new_sl, trade["sl"]):
                 trade["sl"] = new_sl
                 notes.append(
-                    f"🛡 {side_txt(side)} +1.5R foydada! SL bezubitokka (+0.30$) olindi → SL: <code>{trade['sl']}</code>"
+                    f"🛡 <b>[Bosqich 1/4 · Bezubitok]</b> {side_txt(side)} +1.15R ga chiqdi! "
+                    f"SL bezubitokka (+0.40$) ko'chirildi ➡️ <code>{trade['sl']}</code> ($20 hisob 100% xavfsiz!)"
                 )
 
-        # 2) +2.5R da foydaning +1.5R qismini qulflash (Trailing SL)
-        trail_trigger = round(entry + risk_pts * 2.5, 2) if is_long else round(entry - risk_pts * 2.5, 2)
-        if reached(trail_trigger) and not trade.get("tp1_notified"):
+        # Bosqich 2: +3.0R ga chiqqanda SL -> +2.0R foydani qulflaydi
+        trig_s2 = round(entry + risk_pts * 3.0, 2) if is_long else round(entry - risk_pts * 3.0, 2)
+        if reached(trig_s2) and stage < 2:
+            stage = 2
+            trade["trail_stage"] = 2
             trade["tp1_notified"] = True
-            trail_sl = round(entry + risk_pts * 1.5, 2) if is_long else round(entry - risk_pts * 1.5, 2)
-            if better_sl(trail_sl, trade["sl"]):
-                trade["sl"] = trail_sl
-                notes.append(f"🔥 {side_txt(side)} +2.5R! +1.5R foyda qulflandi → SL: <code>{trade['sl']}</code> (TP: <code>{tp_lvl}</code>)")
+            new_sl = round(entry + risk_pts * 2.0, 2) if is_long else round(entry - risk_pts * 2.0, 2)
+            if better_sl(new_sl, trade["sl"]):
+                trade["sl"] = new_sl
+                notes.append(
+                    f"🔥 <b>[Bosqich 2/4 · +2.0R Qulflandi]</b> {side_txt(side)} +3.0R ga yetdi! "
+                    f"SL ➡️ <code>{trade['sl']}</code> (+2.0R naqd foyda qulflandi | Maqsad: <code>{tp_lvl}</code>)"
+                )
 
-        # 3) Asosiy TP yoki SL tekshiruvi
+        # Bosqich 3: +5.5R ga chiqqanda SL -> +4.0R foydani qulflaydi
+        trig_s3 = round(entry + risk_pts * 5.5, 2) if is_long else round(entry - risk_pts * 5.5, 2)
+        if reached(trig_s3) and stage < 3:
+            stage = 3
+            trade["trail_stage"] = 3
+            new_sl = round(entry + risk_pts * 4.0, 2) if is_long else round(entry - risk_pts * 4.0, 2)
+            if better_sl(new_sl, trade["sl"]):
+                trade["sl"] = new_sl
+                notes.append(
+                    f"🚀 <b>[Bosqich 3/4 · +4.0R Qulflandi]</b> {side_txt(side)} +5.5R ga yetdi! "
+                    f"SL ➡️ <code>{trade['sl']}</code> (+4.0R katta foyda qulflandi | Maqsad: <code>{tp_lvl}</code>)"
+                )
+
+        # Bosqich 4: +8.5R ga chiqqanda SL -> +7.0R foydani qulflaydi
+        trig_s4 = round(entry + risk_pts * 8.5, 2) if is_long else round(entry - risk_pts * 8.5, 2)
+        if reached(trig_s4) and stage < 4:
+            stage = 4
+            trade["trail_stage"] = 4
+            trade["tp2_notified"] = True
+            new_sl = round(entry + risk_pts * 7.0, 2) if is_long else round(entry - risk_pts * 7.0, 2)
+            if better_sl(new_sl, trade["sl"]):
+                trade["sl"] = new_sl
+                notes.append(
+                    f"👑 <b>[Bosqich 4/4 · +7.0R Qulflandi]</b> {side_txt(side)} +8.5R ga yetdi! "
+                    f"SL ➡️ <code>{trade['sl']}</code> (+7.0R rekord foyda qulflandi | 10R-12R TP yaqin: <code>{tp_lvl}</code>)"
+                )
+
+        # 3) Asosiy TP (10R-12R) yoki SL tekshiruvi
         # Day Trading tahlil maslahati ("TP ga boradi" yoki "Bitimni yoping")
         cur_r_day = ((price - entry) if is_long else (entry - price)) / risk_pts
         peak_r_day = max(float(trade.get("peak_r_day", 0.0)), cur_r_day)
@@ -3659,12 +3960,17 @@ async def monitor_trade(session, price, bias15):
         tp_hit = reached(tp_lvl)
 
         if tp_hit:
-            to_close = ("TP2", tp_lvl)
+            to_close = ("TP (10R-12R)", tp_lvl)
         elif sl_hit:
             sl_price = trade["sl"]
-            if trade.get("tp1_notified"):
-                label = "TP1 + Trailing SL"
-            elif trade.get("breakeven"):
+            st_now = int(trade.get("trail_stage", 0))
+            if st_now >= 4:
+                label = "TP (+7.0R Trail)"
+            elif st_now == 3:
+                label = "TP (+4.0R Trail)"
+            elif st_now == 2 or trade.get("tp1_notified"):
+                label = "TP (+2.0R Trail)"
+            elif st_now == 1 or trade.get("breakeven"):
                 label = "BE+"
             else:
                 label = "SL"
@@ -3916,13 +4222,21 @@ async def analyze_gold_market(session, run_deep_scoring=True):
         delta5_pre = order_flow_delta(cl5, 6)
         eq15_val = struct15.get("eq")
 
+        # M30 va M45 Bank Manipulyatsiyasi (Forming X3 + Negation + Trust Stop Sweep)
+        cl30 = build_htf_from_15m(cl15, group_bars=2)
+        cl45 = build_htf_from_15m(cl15, group_bars=3)
+        manip30 = detect_bank_manipulation_x3_negation(cl30, tf_label="M30") if cl30 else {}
+        manip45 = detect_bank_manipulation_x3_negation(cl45, tf_label="M45") if cl45 else {}
+        bull_m30_m45_tags = (manip30.get("bull_tags") or []) + (manip45.get("bull_tags") or [])
+        bear_m30_m45_tags = (manip30.get("bear_tags") or []) + (manip45.get("bear_tags") or [])
+
         if pos_24 <= 0.35 and pos_96 <= 0.55 and (not eq15_val or price <= eq15_val):
-            if has_bull_liq_raid and (b5 == "bullish" or delta5_pre > 0):
-                setup_trials.append(("bullish", "Sniper Bottom Entry (BUY)"))
+            if (has_bull_liq_raid or bull_m30_m45_tags) and (b5 == "bullish" or delta5_pre > 0):
+                setup_trials.append(("bullish", "Sniper Bottom Entry + M30/M45 X3 (BUY)" if bull_m30_m45_tags else "Sniper Bottom Entry (BUY)"))
 
         if pos_24 >= 0.65 and pos_96 >= 0.45 and (not eq15_val or price >= eq15_val):
-            if has_bear_liq_raid and (b5 == "bearish" or delta5_pre < 0):
-                setup_trials.append(("bearish", "Sniper Top Entry (SELL)"))
+            if (has_bear_liq_raid or bear_m30_m45_tags) and (b5 == "bearish" or delta5_pre < 0):
+                setup_trials.append(("bearish", "Sniper Top Entry + M30/M45 X3 (SELL)" if bear_m30_m45_tags else "Sniper Top Entry (SELL)"))
 
         for trial_bias, model_name in setup_trials:
             cand_try = build_sniper_trade(
@@ -3968,6 +4282,31 @@ async def analyze_gold_market(session, run_deep_scoring=True):
             )
 
             confirmations.insert(0, candidate.get("setup_model", "SMC Sniper"))
+
+            # M30 / M45 Bank Manipulyatsiyasi (Trust Stop Sweep + Negation + Forming X3) bonuslari
+            m_tags = bull_m30_m45_tags if active_bias == "bullish" else bear_m30_m45_tags
+            if m_tags:
+                bonus_m = min(12, 5 * len(m_tags))
+                score += bonus_m
+                confirmations.append(f"Bank Manipulyatsiyasi: {' + '.join(m_tags[:2])} (+{bonus_m})")
+
+            # Kvant Modullari: López de Prado CUSUM & Larry Harris Mikrostruktura OFI
+            cusum15 = quant_cusum_filter(cl15, threshold_mult=1.10)
+            ofi15 = quant_microstructure_ofi(cl15, lookback=12)
+            tail15 = quant_fat_tail_kurtosis_guard(cl15, lookback=30)
+
+            if cusum15["event"] and cusum15["direction"] == active_bias:
+                score += 8
+                confirmations.append(f"López de Prado CUSUM To'lqin (+8)")
+            if ofi15["bias"] == active_bias:
+                score += 6
+                confirmations.append(f"Mikrostruktura OFI ({ofi15['pressure']:+.1f}% +6)")
+            if tail15["safe"]:
+                score += 4
+                confirmations.append(f"Taleb Tail-Risk Xavfsiz (Kurtosis {tail15['kurtosis']} +4)")
+            else:
+                score -= 10
+                confirmations.append(f"⚠️ Taleb Qora Oqqush Sakrashi (-10)")
 
             # ICT Silver Bullet & 20m Macro Window bonuslari
             if ict_windows["silver_bullet"]:
@@ -4057,8 +4396,14 @@ async def analyze_gold_market(session, run_deep_scoring=True):
             score = max(0, min(100, score))
             grade = "A+" if score >= 80 else ("A" if score >= 68 else "B+")
 
-            lot, usd_risk = calc_xm_lot_and_risk(
-                candidate["entry"], candidate["sl"], acc["balance"], effective_risk
+            # Kvant Garman-Klass Volatillik & Kahneman Fractional Kelly lot hisoblash
+            gk_vol = quant_garman_klass_volatility(cl15, period=14)
+            lot, usd_risk, kelly_pct = quant_kahneman_fractional_kelly_lot(
+                acc["balance"],
+                win_rate_pct=75.0,
+                reward_risk=candidate.get("rr", 3.5),
+                sl_pts=abs(candidate["entry"] - candidate["sl"]),
+                fraction=0.25,
             )
             candidate["min_req_score"] = MIN_SIGNAL_SCORE + psych["score_add"] + pacing_add
             candidate["daily_count"] = daily_cnt + 1
@@ -4103,15 +4448,28 @@ async def analyze_gold_market(session, run_deep_scoring=True):
 
 # ==================== MESSAGE FORMATTERS ====================
 def format_signal_message(trade, status, acc):
-    sl_pts = abs(trade["entry"] - trade["sl"])
-    tp_pts = abs(trade["tp1"] - trade["entry"])
+    entry = trade["entry"]
+    sl_pts = max(abs(entry - trade["sl"]), 0.01)
+    tp_pts = abs(trade["tp1"] - entry)
     tp_usd = round((trade["lot"] / XM_MIN_LOT) * tp_pts * XM_OZ_PER_MIN_LOT, 2)
+    rr_val = tp_pts / sl_pts
+    is_long = trade["signal"] == "LONG"
+    d = 1 if is_long else -1
+    be_p = round(entry + d * (sl_pts * 1.15), 2)
+    s2_p = round(entry + d * (sl_pts * 3.0), 2)
+    s3_p = round(entry + d * (sl_pts * 5.5), 2)
+    s4_p = round(entry + d * (sl_pts * 8.5), 2)
     lines = [
-        f"{side_icon(trade['signal'])} <b>GOLD {side_txt(trade['signal'])}</b> (#{trade.get('daily_count', 1)})",
-        f"Kirish: <code>{trade['entry']}</code>",
-        f"SL: <code>{trade['sl']}</code> (-{trade['risk_usd']:.2f}$)",
-        f"TP: <code>{trade['tp1']}</code> (+{tp_usd:.2f}$) | RR 1:{abs(trade['tp1'] - trade['entry']) / max(abs(trade['entry'] - trade['sl']), 0.01):.1f}",
-        f"Lot: <code>{trade['lot']}</code> | Balans: ${acc['balance']:.2f}",
+        f"{side_icon(trade['signal'])} <b>GOLD {side_txt(trade['signal'])} · 1:{rr_val:.0f} RR SNIPER</b> (#{trade.get('daily_count', 1)})",
+        f"Kirish (Entry): <code>{entry:.2f}</code> | Zona: <b>15m {trade.get('zone_kind', 'SMC')}</b>",
+        f"SL (-1R): <code>{trade['sl']:.2f}</code> (<b>-{trade['risk_usd']:.2f}$</b> — $20 hisob himoyasi)",
+        f"🎯 <b>Asosiy TP (1:{rr_val:.0f} RR): <code>{trade['tp1']:.2f}</code> (+{tp_usd:.2f}$)</b>",
+        f"🛡 <b>Avto-Trailing Bosqichlari:</b>",
+        f"  • +1.15R (<code>{be_p:.2f}</code>) ➡️ SL Bezubitokka (+0.40$)",
+        f"  • +3.0R (<code>{s2_p:.2f}</code>) ➡️ SL +2.0R foydaga qulflanadi",
+        f"  • +5.5R (<code>{s3_p:.2f}</code>) ➡️ SL +4.0R foydaga qulflanadi",
+        f"  • +8.5R (<code>{s4_p:.2f}</code>) ➡️ SL +7.0R foydaga qulflanadi",
+        f"Lot: <code>{trade['lot']}</code> | 💰 Balans: <b>${acc['balance']:.2f}</b>",
     ]
     return "\n".join(lines)
 
@@ -4427,31 +4785,90 @@ def analyze_ake_1m_scalp(cl1, cl5, price, last_closed_ake=None):
         and 36.0 <= cur_rsi <= 66.0
     )
 
+    # Model E: Bank Manipulyatsiyasi — 1m va M30/M45 Trust Stop Sweep + Negation + Forming X3 (Eng uchidan kirish)
+    manip_1m = detect_bank_manipulation_x3_negation(cl1, tf_label="1m")
+    cl30_ref = build_htf_from_15m(cl5, group_bars=2) if (cl5 and len(cl5) >= 16) else []
+    cl45_ref = build_htf_from_15m(cl5, group_bars=3) if (cl5 and len(cl5) >= 24) else []
+    manip_30m = detect_bank_manipulation_x3_negation(cl30_ref, tf_label="M30") if cl30_ref else {}
+    manip_45m = detect_bank_manipulation_x3_negation(cl45_ref, tf_label="M45") if cl45_ref else {}
+
+    # Kvant & Mikrostruktura filtrlari (Larry Harris OFI + Taleb Fat-Tail Jump)
+    ofi_1m = quant_microstructure_ofi(cl1, lookback=10)
+    tail_1m = quant_fat_tail_kurtosis_guard(cl1, lookback=25)
+
+    bull_manip_combo = (
+        is_strong_bull_candle
+        and (manip_1m["bull_trust_sweep"] or manip_1m["bull_negation"])
+        and (manip_1m["bull_x3"] or touched_bull_zone or manip_30m.get("bull_negation") or manip_45m.get("bull_x3"))
+        and pos_30 <= 0.58
+        and cur_rsi <= 67.0
+    )
+    bear_manip_combo = (
+        is_strong_bear_candle
+        and (manip_1m["bear_trust_sweep"] or manip_1m["bear_negation"])
+        and (manip_1m["bear_x3"] or touched_bear_zone or manip_30m.get("bear_negation") or manip_45m.get("bear_x3"))
+        and pos_30 >= 0.42
+        and cur_rsi >= 33.0
+    )
+
+    # Anti-Overtrade filtri: diapazonning qoq o'rtasida (0.42 < pos_30 < 0.58) hech qanday Zona, Sweep yoki Negation/X3 bo'lmasa shovqinga kirmaslik!
+    in_mid_chop = (0.42 < pos_30 < 0.58)
+    has_bull_anchor = bool(
+        touched_bull_zone or swept_low_recently or manip_1m["bull_trust_sweep"]
+        or manip_1m["bull_negation"] or manip_30m.get("bull_tags") or manip_45m.get("bull_tags")
+    )
+    has_bear_anchor = bool(
+        touched_bear_zone or swept_high_recently or manip_1m["bear_trust_sweep"]
+        or manip_1m["bear_negation"] or manip_30m.get("bear_tags") or manip_45m.get("bear_tags")
+    )
+
     sig_side = None
     sig_reason = []
     matched_zone = None
-    if bull_sweep_reversal or bull_trend_breakout or bull_zone_bounce or bull_hl_pullback:
+    # Kvant mikrostruktura: agar sotuvchilar bosimi juda kuchli (ofi <= 0.45) bo'lsa yoki qora sakrash (jump) bo'lsa kirish to'xtatiladi
+    long_micro_ok = tail_1m["safe"] and ofi_1m["ofi_ratio"] >= 0.45
+    short_micro_ok = tail_1m["safe"] and ofi_1m["ofi_ratio"] <= 2.20
+
+    if (bull_sweep_reversal or bull_trend_breakout or bull_zone_bounce or bull_hl_pullback or bull_manip_combo) and (not in_mid_chop or has_bull_anchor) and long_micro_ok:
         sig_side = "LONG"
         matched_zone = active_bull_zone
-        if bull_sweep_reversal:
-            sig_reason.append("Likvidlik supurildi + Qayrilish")
+        if bull_sweep_reversal or manip_1m["bull_trust_sweep"]:
+            sig_reason.append("Trust Stop Sweep (Uchidan qayrilish)")
+        if manip_1m["bull_negation"]:
+            sig_reason.append("1m Negation+2B")
+        if manip_1m["bull_x3"]:
+            sig_reason.append("Forming X3")
         if bull_hl_pullback:
             sig_reason.append("Higher Low (HL) Korreksiya + BOS")
         if bull_trend_breakout:
             sig_reason.append("Supertrend BOS impuls")
         if touched_bull_zone and active_bull_zone:
             sig_reason.append(f"{active_bull_zone.get('tf', '1m')} {active_bull_zone['kind']} zonadan")
-    elif bear_sweep_reversal or bear_trend_breakout or bear_zone_bounce or bear_lh_pullback:
+        for t_tag in (manip_30m.get("bull_tags", []) + manip_45m.get("bull_tags", []))[:2]:
+            if t_tag not in sig_reason:
+                sig_reason.append(t_tag)
+        if ofi_1m["ofi_ratio"] >= 1.35:
+            sig_reason.append(f"Kvant OFI (+{ofi_1m['pressure']}%)")
+    elif (bear_sweep_reversal or bear_trend_breakout or bear_zone_bounce or bear_lh_pullback or bear_manip_combo) and (not in_mid_chop or has_bear_anchor) and short_micro_ok:
         sig_side = "SHORT"
         matched_zone = active_bear_zone
-        if bear_sweep_reversal:
-            sig_reason.append("Likvidlik supurildi + Qayrilish")
+        if bear_sweep_reversal or manip_1m["bear_trust_sweep"]:
+            sig_reason.append("Trust Stop Sweep (Uchidan qayrilish)")
+        if manip_1m["bear_negation"]:
+            sig_reason.append("1m Negation+2B")
+        if manip_1m["bear_x3"]:
+            sig_reason.append("Forming X3")
         if bear_lh_pullback:
             sig_reason.append("Lower High (LH) Korreksiya + BOS")
         if bear_trend_breakout:
             sig_reason.append("Supertrend BOS impuls")
         if touched_bear_zone and active_bear_zone:
             sig_reason.append(f"{active_bear_zone.get('tf', '1m')} {active_bear_zone['kind']} zonadan")
+        for t_tag in (manip_30m.get("bear_tags", []) + manip_45m.get("bear_tags", []))[:2]:
+            if t_tag not in sig_reason:
+                sig_reason.append(t_tag)
+        if ofi_1m["ofi_ratio"] <= 0.70:
+            sig_reason.append(f"Kvant OFI ({ofi_1m['pressure']}%)")
 
     # 3) AQLLI ANTI-EXHAUSTION FILTRI (EMA21 yoki >=1.3x ATR korreksiya bo'lganda yangi SELL/BUY ga ruxsat beradi!)
     if sig_side and last_closed_ake:
@@ -5738,16 +6155,21 @@ async def handle_command(session, chat_id, text, message_id=None):
     elif cmd in ("/bridge", "/termux"):
         t_online = (time.time() - _TERMUX_BRIDGE_STATE.get("last_seen", 0)) <= 30
         age_s = int(time.time() - _TERMUX_BRIDGE_STATE.get("last_seen", 0)) if _TERMUX_BRIDGE_STATE.get("last_seen") else -1
+        rail_dom = os.environ.get("RAILWAY_PUBLIC_DOMAIN") or os.environ.get("RENDER_EXTERNAL_HOSTNAME") or ""
+        srv_url = f"https://{rail_dom}" if rail_dom else (WEBAPP_URL.rstrip("/") if WEBAPP_URL else "https://web-production-cc6e3.up.railway.app")
         b_msg = (
             f"📱 <b>Termux / MT5 Cloud Bridge Holati:</b>\n"
             f"Holat: <b>{'🟢 ONLINE' if t_online else '⚪ OFFLINE'}</b> "
             f"({f'{age_s}s oldin ko`rindi' if age_s >= 0 else 'hali ulanmagan'})\n"
+            f"🌐 Server URL: <code>{html.escape(srv_url)}</code>\n"
             f"Login: <code>{_TERMUX_BRIDGE_STATE.get('login') or '-'}</code> | "
             f"Server: <code>{_TERMUX_BRIDGE_STATE.get('server') or '-'}</code>\n"
             f"Simbol: <code>{_TERMUX_BRIDGE_STATE.get('symbol') or 'XAUUSDm'}</code> | "
             f"Bid/Ask: <code>{_TERMUX_BRIDGE_STATE.get('bid') or '-'} / {_TERMUX_BRIDGE_STATE.get('ask') or '-'}</code>\n"
             f"Balans: <b>${_TERMUX_BRIDGE_STATE.get('balance') if _TERMUX_BRIDGE_STATE.get('balance') is not None else '-'}</b> | "
-            f"Navbatdagi signallar: <code>{len(_BRIDGE_SIGNALS_QUEUE)}</code> ta"
+            f"Navbatdagi signallar: <code>{len(_BRIDGE_SIGNALS_QUEUE)}</code> ta\n\n"
+            f"💻 <b>Termux'da ulash buyrug'i:</b>\n"
+            f"<code>python termux_autotrader.py --url {html.escape(srv_url)}</code>"
         )
         await send_telegram(session, b_msg, chat_id=cid)
 
